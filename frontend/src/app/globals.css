@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+/* -------------------------------------------------------------------------
+   Design tokens.
+
+   Two layers on purpose: `--dp-*` holds the raw palette and is the only thing
+   that changes between themes; `@theme` maps those onto Tailwind utilities so
+   a theme switch never requires touching a component.
+   ------------------------------------------------------------------------- */
+
+@theme {
+  --color-canvas: var(--dp-canvas);
+  --color-surface: var(--dp-surface);
+  --color-surface-hover: var(--dp-surface-hover);
+  --color-elevated: var(--dp-elevated);
+
+  --color-line: var(--dp-line);
+  --color-line-strong: var(--dp-line-strong);
+
+  --color-ink: var(--dp-ink);
+  --color-ink-muted: var(--dp-ink-muted);
+  --color-ink-faint: var(--dp-ink-faint);
+
+  --color-accent: var(--dp-accent);
+  --color-accent-hover: var(--dp-accent-hover);
+  --color-accent-ink: var(--dp-accent-ink);
+  --color-accent-soft: var(--dp-accent-soft);
+
+  --color-success: var(--dp-success);
+  --color-warning: var(--dp-warning);
+  --color-danger: var(--dp-danger);
+
+  --font-sans:
+    "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Cascadia Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  /* Denser than Tailwind's defaults: this is a tool, not a marketing page. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.375rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.125rem;
+  --text-xl--line-height: 1.625rem;
+  --text-2xl: 1.375rem;
+  --text-2xl--line-height: 1.875rem;
+  --text-3xl: 1.75rem;
+  --text-3xl--line-height: 2.125rem;
+
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+}
+
+/* Dark is the default; the theme script writes data-theme on <html> before
+   paint, so an explicit light attribute is the only override needed. */
+:root {
+  --dp-canvas: #0a0b0d;
+  --dp-surface: #101215;
+  --dp-surface-hover: #16191e;
+  --dp-elevated: #191d22;
+
+  --dp-line: #1e2228;
+  --dp-line-strong: #2c3239;
+
+  --dp-ink: #e8eaed;
+  --dp-ink-muted: #99a1aa;
+  --dp-ink-faint: #6b727b;
+
+  --dp-accent: #4c8dff;
+  --dp-accent-hover: #6ba1ff;
+  --dp-accent-ink: #ffffff;
+  --dp-accent-soft: rgb(76 141 255 / 0.12);
+
+  --dp-success: #3fb950;
+  --dp-warning: #d9a036;
+  --dp-danger: #f0605a;
+
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --dp-canvas: #fafafb;
+  --dp-surface: #ffffff;
+  --dp-surface-hover: #f4f5f7;
+  --dp-elevated: #ffffff;
+
+  --dp-line: #e4e6ea;
+  --dp-line-strong: #d1d5db;
+
+  --dp-ink: #16181c;
+  --dp-ink-muted: #5c636c;
+  --dp-ink-faint: #868d96;
+
+  --dp-accent: #2563eb;
+  --dp-accent-hover: #1d4ed8;
+  --dp-accent-ink: #ffffff;
+  --dp-accent-soft: rgb(37 99 235 / 0.09);
+
+  --dp-success: #1a7f37;
+  --dp-warning: #9a6700;
+  --dp-danger: #cf222e;
+
+  color-scheme: light;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+  }
+
+  /* One focus treatment everywhere, visible on every surface. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+    color: var(--color-ink);
+  }
+
+  /* The default scrollbar is a bright seam on a dark canvas. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

@@ -1,0 +1,26 @@
+# PostgreSQL for local development. The application itself is run on the host
+# (uvicorn / next dev) so that reloads stay fast; only stateful infrastructure
+# lives in Docker.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: devpilot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-devpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpilot}
+      POSTGRES_DB: ${POSTGRES_DB:-devpilot}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - devpilot-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Guards `docker compose up --wait` and stops migrations from running
+      # against a server that has not finished initialising.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-devpilot} -d ${POSTGRES_DB:-devpilot}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  devpilot-postgres-data:
