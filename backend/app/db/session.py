@@ -16,6 +16,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
 
+# Applied per resolved address, and "localhost" resolves to both ::1 and
+# 127.0.0.1 — so the worst case is twice this. Kept at 3s to stay inside the
+# frontend's 8s request budget while tolerating a slow local start.
+CONNECT_TIMEOUT_SECONDS = 3
+
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
@@ -26,6 +31,9 @@ def get_engine() -> Engine:
         # so a restarted database does not surface as a stale-connection error.
         pool_pre_ping=True,
         pool_recycle=1800,
+        # Without this, an unreachable host is left to the OS TCP timeout, and a
+        # request hangs for tens of seconds instead of returning a prompt 503.
+        connect_args={"connect_timeout": CONNECT_TIMEOUT_SECONDS},
         future=True,
     )
 

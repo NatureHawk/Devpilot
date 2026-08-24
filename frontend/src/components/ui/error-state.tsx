@@ -3,13 +3,27 @@ import { AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { ApiError } from "@/lib/api";
 
+/** Failure modes a developer can act on get their own copy. */
+const KNOWN: Partial<Record<ApiError["code"], { title: string; detail: string }>> = {
+  // During local development this almost always means the API is not running.
+  unreachable: {
+    title: "Cannot reach the DevPilot API",
+    detail:
+      "The API did not respond. Confirm the backend is running and that BACKEND_URL points at it.",
+  },
+  // The API answered, so it is up — its database is not.
+  service_unavailable: {
+    title: "The database is unavailable",
+    detail:
+      "The API is running but cannot reach PostgreSQL. Confirm the database is started and that DATABASE_URL is correct, then run migrations.",
+  },
+};
+
 /**
- * Renders a failed API call. "Unreachable" gets its own copy because during
- * local development it almost always means the API process is not running, and
- * telling the developer that is more useful than a generic failure notice.
+ * Renders a failed API call, naming the cause whenever the code identifies one.
  */
 export function ApiErrorState({ error, className }: { error: ApiError; className?: string }) {
-  const unreachable = error.code === "unreachable";
+  const known = KNOWN[error.code];
 
   return (
     <div
@@ -25,18 +39,13 @@ export function ApiErrorState({ error, className }: { error: ApiError; className
         strokeWidth={1.75}
       />
       <div className="min-w-0">
-        <p className="text-ink text-sm font-medium">
-          {unreachable ? "Cannot reach the DevPilot API" : "Something went wrong"}
-        </p>
+        <p className="text-ink text-sm font-medium">{known?.title ?? "Something went wrong"}</p>
         <p className="text-ink-muted mt-1 text-sm leading-relaxed">
-          {unreachable
-            ? "The API did not respond. Confirm the backend is running and that BACKEND_URL points at it."
-            : error.message}
+          {known?.detail ?? error.message}
         </p>
-        {!unreachable ? (
+        {error.status ? (
           <p className="text-2xs text-ink-faint mt-2 font-mono">
-            {error.code}
-            {error.status ? ` · ${error.status}` : null}
+            {error.code} · {error.status}
           </p>
         ) : null}
       </div>

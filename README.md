@@ -117,37 +117,73 @@ reach the client.
 
 ## Local development
 
-Prerequisites: Node 20+, Python 3.11+, and Docker (or a local PostgreSQL 16).
+Prerequisites: Node 20+, Python 3.11+, and PostgreSQL 16 (via Docker or installed natively).
 
-```bash
+> **Windows PowerShell users:** `&&` is not a statement separator in Windows PowerShell 5.1. Run
+> each line below on its own — every command here is written one per line for that reason.
+
+**0. Configuration**
+
+```
 cp .env.example .env
 ```
 
-**1. Database**
+**1. Database** — either option works; they are alternatives, not steps.
 
-```bash
+*With Docker:*
+
+```
 docker compose up -d --wait
 ```
 
-Without Docker, create a PostgreSQL 16 database and point `DATABASE_URL` at it.
+*Without Docker*, install PostgreSQL 16 and create the database. On Windows:
 
-**2. Backend**
+```
+winget install PostgreSQL.PostgreSQL.16
+```
 
-```bash
+Then, in a new shell so the updated PATH is picked up:
+
+```
+psql -U postgres -c "CREATE USER devpilot WITH PASSWORD 'devpilot';"
+psql -U postgres -c "CREATE DATABASE devpilot OWNER devpilot;"
+```
+
+Any PostgreSQL 16 instance is fine as long as `DATABASE_URL` in `.env` points at it.
+
+**2. Backend** — run from the `backend/` directory.
+
+```
 cd backend
 python -m venv .venv
-# Windows:      .venv\Scripts\activate
-# macOS/Linux:  source .venv/bin/activate
+```
+
+Activate the virtual environment:
+
+```
+.venv\Scripts\Activate.ps1     # Windows PowerShell
+.venv\Scripts\activate.bat     # Windows cmd
+source .venv/bin/activate      # macOS / Linux
+```
+
+If PowerShell blocks the activation script, skip activating and call the interpreter directly
+(`.venv\Scripts\python.exe -m ...`), or allow scripts for the current user with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+
+```
 pip install -e ".[dev]"
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
+`uvicorn` must be started from `backend/`, otherwise `app` is not importable
+(`ModuleNotFoundError: No module named 'app'`).
+
 API docs at http://localhost:8000/docs (local environments only).
 
 **3. Frontend**
 
-```bash
+```
 cd frontend
 npm install
 npm run dev
@@ -155,14 +191,27 @@ npm run dev
 
 http://localhost:3000
 
+### Running without a database
+
+`GET /health` and `GET /api/v1/meta/integrations` need no database, so the app starts and the shell
+renders. Routes that read data return `503 service_unavailable` within ~6s rather than hanging, and
+the UI shows an explicit "database is unavailable" state. This is a degraded mode for inspecting the
+interface, not a supported way to run DevPilot.
+
 **Checks**
 
-```bash
-# backend
-cd backend && pytest && ruff check . && ruff format --check . && mypy app
+```
+# backend — from backend/
+pytest
+ruff check .
+ruff format --check .
+mypy app
 
-# frontend
-cd frontend && npm test && npm run lint && npm run typecheck && npm run build
+# frontend — from frontend/
+npm test
+npm run lint
+npm run typecheck
+npm run build
 ```
 
 ## Environment variables

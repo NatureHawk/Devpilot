@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,20 @@ def register_exception_handlers(app: FastAPI) -> None:
         # Covers 404s from unmatched routes and anything raised as HTTPException.
         code = "not_found" if exc.status_code == status.HTTP_404_NOT_FOUND else "http_error"
         return _render(exc.status_code, code, str(exc.detail))
+
+    @app.exception_handler(DBAPIError)
+    async def _database_error(request: Request, exc: DBAPIError) -> JSONResponse:
+        """A database that cannot answer is unavailability, not a server bug.
+
+        Reported as 503 so clients can retry, and logged in full because the
+        driver message can embed the connection string and must not be returned.
+        """
+        logger.exception("Database error on %s %s", request.method, request.url.path)
+        return _render(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            ServiceUnavailableError.code,
+            "The database is not reachable.",
+        )
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:

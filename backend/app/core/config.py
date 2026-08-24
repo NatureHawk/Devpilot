@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Environment = Literal["local", "test", "staging", "production"]
 
@@ -34,7 +34,11 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
 
-    cors_origins: list[str] = Field(default=["http://localhost:3000"], alias="CORS_ORIGINS")
+    # NoDecode stops pydantic-settings from JSON-parsing this before the
+    # validator below runs; without it a plain "a,b" in .env raises at startup.
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default=["http://localhost:3000"], alias="CORS_ORIGINS"
+    )
 
     github_client_id: str = Field(default="", alias="GITHUB_CLIENT_ID")
     github_client_secret: str = Field(default="", alias="GITHUB_CLIENT_SECRET")
