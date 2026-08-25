@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.repository import Repository
 
 
-def list_repositories(session: Session, *, limit: int = 50, offset: int = 0) -> list[Repository]:
-    stmt = (
-        select(Repository)
-        .order_by(Repository.created_at.desc(), Repository.id)
-        .limit(limit)
-        .offset(offset)
-    )
-    return list(session.scalars(stmt))
+def list_repositories(
+    session: Session, *, user_id: uuid.UUID | None = None, limit: int = 50, offset: int = 0
+) -> list[Repository]:
+    stmt = select(Repository).order_by(Repository.created_at.desc(), Repository.id)
+    if user_id is not None:
+        stmt = stmt.where(Repository.connected_by_user_id == user_id)
+    return list(session.scalars(stmt.limit(limit).offset(offset)))
 
 
-def count_repositories(session: Session) -> int:
-    return session.scalar(select(func.count()).select_from(Repository)) or 0
+def count_repositories(session: Session, *, user_id: uuid.UUID | None = None) -> int:
+    stmt = select(func.count()).select_from(Repository)
+    if user_id is not None:
+        stmt = stmt.where(Repository.connected_by_user_id == user_id)
+    return session.scalar(stmt) or 0
+
+
+def get_by_id(session: Session, repository_id: uuid.UUID) -> Repository | None:
+    return session.get(Repository, repository_id)
 
 
 def get_by_full_name(

@@ -13,6 +13,9 @@ import { listRepositories } from "@/lib/api";
 export default async function DashboardPage() {
   const result = await listRepositories();
   const repositories = result.ok ? result.data.items : [];
+  // Being signed out is the expected first-run state, so the dashboard shows
+  // its onboarding rather than an error.
+  const signedOut = !result.ok && result.error.code === "not_authenticated";
 
   return (
     <>
@@ -38,7 +41,7 @@ export default async function DashboardPage() {
           </ButtonLink>
         </div>
 
-        {!result.ok ? <ApiErrorState error={result.error} className="mt-8" /> : null}
+        {!result.ok && !signedOut ? <ApiErrorState error={result.error} className="mt-8" /> : null}
 
         <div className="mt-10 space-y-6">
           {repositories.length === 0 ? (

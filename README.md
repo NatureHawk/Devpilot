@@ -19,18 +19,25 @@ The intended end-to-end flow is:
 
 ## Current status
 
-**This milestone is the production-grade foundation and UI shell.** It is honest about what exists:
+**Steps 1–3 of the flow above are implemented and working: connect, index, and browse the
+structured result.** A repository can be signed into via GitHub, connected, and indexed into
+PostgreSQL as source files and syntax-aware code chunks.
 
-- The Next.js application, its design system, and every screen listed below are built and wired to
-  the real API.
-- The FastAPI service, its error contract, configuration, database schema and migration are built.
-- **No GitHub integration, no indexing, no retrieval, and no answer generation exist yet.** Screens
-  that depend on them render explicit, explained empty states — driven by real backend state, not by
-  hardcoded flags. Nothing simulates an answer, a repository, a diff, or a pull request.
+**This milestone prepares structured code for retrieval. It does not perform semantic or vector
+search yet** — there are no embeddings, no vector index, and no model calls anywhere in the
+codebase.
 
-Concretely: the API reports whether GitHub and an AI provider are configured in *this deployment's*
-environment, and the UI renders what it is told. Connecting a repository is unavailable because the
-OAuth flow does not exist. The "Index repository" button is inert and says so.
+What works end to end:
+
+- GitHub OAuth sign-in, with the access token encrypted at rest and never exposed to the browser.
+- Connecting a repository, with visibility and default branch read from GitHub itself.
+- Indexing: repository tree → filtering → source download → language detection → Tree-sitter
+  parsing → structural chunking → PostgreSQL, with real counts reported in the UI.
+- Re-indexing, which replaces the previous snapshot without producing duplicates.
+
+What deliberately does not exist yet: embeddings, vector search, RAG, answer generation, proposed
+changes, diffs, and pull requests. Those screens still render explicit empty states driven by real
+backend state — nothing is simulated.
 
 ## Architecture
 
@@ -58,6 +65,38 @@ Inside the backend a request flows in one direction only:
 ```
 route (HTTP shape) -> service (rules) -> repository (SQL) -> session (transaction)
 ```
+
+### Indexing architecture
+
+```mermaid
+flowchart LR
+    GH["GitHub
+    Git Trees + Blobs API"]
+    TREE["Tree
+    full file listing
+    truncation detected"]
+    FILTER["Filter
+    excluded paths
+    size + budget limits
+    binary detection"]
+    PARSE["Parser
+    Tree-sitter
+    symbols + line ranges"]
+    CHUNK["Chunker
+    syntax-aware chunks
+    line-window fallback"]
+    DB[("PostgreSQL
+    files + code_chunks")]
+
+    GH --> TREE --> FILTER --> PARSE --> CHUNK --> DB
+```
+
+Each stage is its own module under `app/services/indexing/`, and
+`app/services/indexing/service.py` only sequences them and owns the transaction boundaries. The
+route calls one function.
+
+**Repository content is data, never code.** It is downloaded, decoded, parsed by Tree-sitter and
+stored. Nothing from a repository is executed, imported, installed, built, or passed to a shell.
 
 Routes never contain SQL. Data access lives in `app/repositories/` so the statements stay visible in
 one place.
@@ -97,13 +136,28 @@ DevPilot/
 | `.../code`, `.../ask`, `.../changes`, `.../pull-requests`  | Workspace tabs                       |
 | `/activity`, `/settings`                                   | Activity log and settings            |
 
-| API                                        | Purpose                                      |
-| ------------------------------------------- | -------------------------------------------- |
-| `GET /health`                               | Liveness — touches no dependency             |
-| `GET /health/ready`                         | Readiness — verifies the database answers    |
-| `GET /api/v1/meta/integrations`             | Which integrations are configured (booleans) |
-| `GET /api/v1/repositories`                  | Connected repositories                       |
-| `GET /api/v1/repositories/{owner}/{name}`   | One repository, or a structured 404          |
+| API                                              | Purpose                                       |
+| ------------------------------------------------ | --------------------------------------------- |
+| `GET /health`                                     | Liveness — touches no dependency              |
+| `GET /health/ready`                               | Readiness — verifies the database answers     |
+| `GET /api/v1/meta/integrations`                   | Which integrations are configured (booleans)  |
+| `GET /api/v1/auth/github/authorize`               | Start GitHub sign-in                          |
+| `POST /api/v1/auth/github/callback`               | Exchange the code, issue a session            |
+| `GET /api/v1/auth/me`                             | The signed-in account, or `null`              |
+| `POST /api/v1/auth/github/disconnect`             | Forget the stored GitHub token                |
+| `GET /api/v1/repositories`                        | Repositories connected by the caller          |
+| `POST /api/v1/repositories`                       | Connect a repository by `owner`/`name`        |
+| `GET /api/v1/repositories/{owner}/{name}`         | One repository, or a structured 404           |
+| `POST /api/v1/repositories/{id}/index`            | Run indexing — **synchronous**, returns stats |
+| `GET /api/v1/repositories/{id}/index`             | Current indexing state                        |
+| `GET /api/v1/repositories/{id}/languages`         | Indexed file counts per language              |
+
+`POST /{id}/index` holds the request open for the whole run and returns the real counts. There is no
+worker queue, and the status response says so explicitly (`"synchronous": true`) rather than
+implying a background job that does not exist.
+
+The API is stateless: Next.js holds the session in an HttpOnly cookie and forwards it as
+`Authorization: Bearer`, so the backend never depends on cookie domains.
 
 Every failure — from any route — has the same body:
 
@@ -228,27 +282,155 @@ integration is configured, never the credential.
 | `LOG_LEVEL`, `CORS_ORIGINS`                          | backend  | `CORS_ORIGINS` is comma-separated.                      |
 | `BACKEND_URL`                                        | frontend | Server-side only; the browser never sees it.            |
 | `NEXT_PUBLIC_APP_URL`                                | frontend | Public origin, for absolute links and future callbacks. |
-| `GITHUB_CLIENT_ID` / `_SECRET` / `_WEBHOOK_SECRET`   | backend  | Unset today; only their presence is reported to the UI. |
+| `SECRET_KEY`                                         | backend  | Signs sessions and OAuth state; derives the token encryption key. Required outside local. |
+| `GITHUB_CLIENT_ID` / `_SECRET`                       | backend  | From a GitHub OAuth App. Callback: `http://localhost:3000/api/auth/github/callback`. |
+| `GITHUB_WEBHOOK_SECRET`                              | backend  | Reserved; unused in this milestone.                     |
+| `GITHUB_API_URL` / `_TIMEOUT_SECONDS` / `_MAX_CONCURRENCY` | backend | API base, per-request timeout, blob download concurrency. |
+| `INDEX_MAX_*`, `INDEX_FALLBACK_CHUNK_LINES`          | backend  | Indexing resource limits — see below.                   |
 | `ANTHROPIC_API_KEY`                                  | backend  | Reserved for the retrieval and answering milestone.     |
+
+## Indexing
+
+### Supported languages
+
+**Parsed with Tree-sitter** — structure is extracted, so chunks are functions, classes and methods:
+
+| Language              | Extensions                  |
+| --------------------- | --------------------------- |
+| Python                | `.py`, `.pyi`               |
+| JavaScript            | `.js`, `.mjs`, `.cjs`       |
+| JavaScript (JSX)      | `.jsx`                      |
+| TypeScript            | `.ts`, `.mts`, `.cts`       |
+| TypeScript (TSX)      | `.tsx`                      |
+
+**Stored as text, not parsed** — indexed and searchable, but chunked by line windows because no
+grammar is configured: Java, C, C++, C#, Go, Rust, Ruby, PHP, SQL, Markdown, JSON, YAML, TOML,
+Shell, HTML, CSS, plain text.
+
+The registry in `app/services/indexing/languages.py` marks a language `parseable` only when
+`parser.py` really has a grammar for it, and a test asserts the two agree. DevPilot never claims
+syntax awareness it does not have. Adding a language means adding a grammar, node-type mappings and
+tests — not just an extension.
+
+### Filtering rules
+
+Applied in `app/services/indexing/filters.py`, the single place any path or extension is inspected.
+
+Excluded by directory segment: `.git`, `.hg`, `.svn`, `node_modules`, `bower_components`, `vendor`,
+`.venv`, `venv`, `env`, `site-packages`, `__pycache__`, `.mypy_cache`, `.pytest_cache`,
+`.ruff_cache`, `.tox`, `dist`, `build`, `out`, `target`, `obj`, `.next`, `.nuxt`, `.turbo`,
+`.gradle`, `.terraform`, `coverage`, `htmlcov`, `.idea`, `.vscode`.
+
+Matching is on whole segments, so a file named `build.py` is kept while `build/out.js` is not.
+
+Also excluded: lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`,
+`Cargo.lock`, `composer.lock`, `Gemfile.lock`, `go.sum`), build products keeping a source extension
+(`*.min.js`, `*.min.css`, `*.bundle.js`, `*.map`, `*.lock`), submodules, empty files, unknown
+extensions, and files over the size limit.
+
+Binary detection is a NUL byte in the first 8 000 bytes. Decoding is strict UTF-8 — a file that
+will not decode is skipped rather than mangled, because replacing bad bytes would silently corrupt
+the stored source and every chunk cut from it.
+
+### Chunking strategy
+
+**Emit the largest syntactic unit that fits inside the size limit, and descend into it only when it
+does not.**
+
+- A function or method that fits becomes one chunk.
+- A class that fits is kept whole — its methods are *not* also emitted, because that would store the
+  same code twice.
+- A class too large to store whole yields its methods individually, plus the class's own leftover
+  body as separate blocks. The parent is never duplicated into its children.
+- A single symbol larger than the limit is split on line boundaries into numbered parts
+  (`part_index` / `part_count`), each keeping the symbol's name and type.
+- A file with no parseable structure falls back to line windows.
+
+Every chunk carries `path → symbol → parent_symbol → line range → source`, so a future retrieval
+result can be displayed without reparsing anything. Context is preserved by reference —
+`parent_symbol` names the enclosing class rather than copying its body into each method.
+
+Chunks never overlap, boundaries never cut mid-line, and fragments with no alphanumeric content
+(a stray `;` or closing brace) are dropped rather than stored as noise.
+
+Wrappers are folded into the declaration they introduce: `export class Widget` and a decorated
+Python function are each one chunk, not a chunk plus an orphaned `export`/`@decorator` fragment.
+
+### Resource limits
+
+| Limit                        | Default | Why                                                             |
+| ---------------------------- | ------- | --------------------------------------------------------------- |
+| `INDEX_MAX_FILE_BYTES`       | 512 KB  | Comfortably holds real source; larger is usually generated data. |
+| `INDEX_MAX_TOTAL_BYTES`      | 50 MB   | Ceiling on one repository's indexed source.                      |
+| `INDEX_MAX_FILES`            | 5 000   | Bounds a run's request count and duration.                       |
+| `INDEX_MAX_CHUNK_CHARS`      | 8 000   | Large enough for most functions; splits beyond it.               |
+| `INDEX_FALLBACK_CHUNK_LINES` | 120     | Line window for unstructured files.                              |
+| `GITHUB_MAX_CONCURRENCY`     | 8       | Concurrent blob downloads; far below any rate limit.             |
+| `GITHUB_TIMEOUT_SECONDS`     | 20      | Per request, with retries on 5xx only.                           |
+| Subtree requests             | 300     | Cap when walking a truncated tree.                               |
+
+Blobs are downloaded in windows rather than all at once, so memory stays flat instead of growing
+with the repository, and rows are flushed to the open transaction every 25 files.
+
+### Indexing states
+
+```
+not_indexed ──▶ indexing ──▶ indexed
+                    └──────▶ failed
+
+indexed ──▶ indexing ──▶ indexed | failed
+failed  ──▶ indexing ──▶ indexed | failed
+```
+
+`queued` does not exist: indexing is synchronous, so nothing ever sits in a queue, and an
+unreachable state would be a lie in the schema.
+
+**A failed run never destroys a good index.** The old rows are deleted inside the same transaction
+that writes the replacement, so the delete only becomes durable if the whole run commits. `failed`
+means "the newest attempt failed", not "there is no index" — and the UI says so, naming the files
+and chunks still searchable.
+
+A run whose process died is detected as stale after 30 minutes so the repository can be retried
+rather than being stuck in `indexing` forever.
+
+### Known limitations
+
+- **Indexing is synchronous.** The HTTP request is held open for the whole run, so a large
+  repository means a long request, and navigating away cancels it. There is no worker
+  infrastructure, and the API does not pretend otherwise.
+- **No incremental progress.** Counts appear when the run completes; the UI shows an honest pending
+  state rather than a fabricated percentage.
+- **No incremental re-indexing.** A re-index replaces the whole snapshot, even if one file changed.
+  `indexed_commit_sha` is stored so a future milestone can diff instead.
+- **Truncated trees have a ceiling.** Past 300 subtree requests the run fails loudly rather than
+  indexing part of a repository.
+- **A parse failure is recorded, not hidden.** The file is stored and chunked by lines, and the run
+  reports `complete: false` so a partially-parsed index is visible rather than silent.
 
 ## Database schema
 
-`users`, `repositories`, `conversations`, `messages`. Five decisions worth stating:
+`users`, `repositories`, `files`, `code_chunks`, `conversations`, `messages`. Decisions worth
+stating:
 
 - **UUID primary keys, generated in the application.** A caller holds the id before the INSERT,
   which makes logging and building related rows in one flush straightforward.
 - **`repositories` is unique on `(provider, owner, name)`.** That triple is also how the frontend
   addresses a repository (`/repositories/{owner}/{repo}`), so the URL and the constraint agree.
   Lookups are case-insensitive, because a pasted URL may not match the stored casing.
-- **`indexing_status` is an enum with values that cannot occur yet** (`queued`, `indexing`,
-  `indexed`, `failed`). The column's meaning is part of the schema contract ingestion will fill in;
-  only `not_indexed` occurs today.
+- **`files` is unique on `(repository_id, path)`.** Re-indexing replaces a repository's rows rather
+  than appending, and the constraint makes a duplicate impossible rather than merely unlikely.
+- **File content is stored inline.** Retrieval needs the exact bytes that were parsed, not whatever
+  the branch holds later, and the per-file size limit keeps rows bounded.
+- **`code_chunks.repository_id` is denormalised** from `files`. Retrieval always filters by
+  repository, and this avoids a join on the hottest future query path.
+- **`users.email` is nullable, `github_id` is the identity.** GitHub only releases an email for
+  accounts with a public address, and a user can rename their login — the numeric id cannot change.
 - **No `repository_memberships` table.** A single `connected_by_user_id` covers the current
   single-workspace model. Membership arrives with multi-user workspaces and is cheap to migrate to;
   adding it now would be a table with no reader.
-- **Indexes follow actual reads.** `(repository_id, created_at)` on conversations and
-  `(conversation_id, created_at)` on messages exist because both listings are always "rows for one
-  parent, in time order". Nothing else is indexed speculatively.
+- **Indexes follow actual reads.** `(file_id, start_line)` reads a file's chunks in source order;
+  `(repository_id, chunk_type)` answers repository-wide filters; `(repository_id, language)` backs
+  the language breakdown. Nothing is indexed speculatively.
 
 Foreign keys cascade where the child is meaningless without its parent (messages → conversations,
 conversations → repositories) and `SET NULL` where it is not — deleting a user should not delete the
@@ -272,8 +454,19 @@ which means retrieval will not require a second datastore.
 **Docker Compose for the database only.** Stateful infrastructure is worth containerising; the app
 processes are not, because `uvicorn --reload` and `next dev` are faster on the host.
 
-**Deliberately absent:** Redis, a queue, a vector database, containers for the app processes, and
-authentication scaffolding. Each solves a problem this codebase does not have yet.
+**Tree-sitter for parsing.** Error-tolerant by design, so a file with one broken function still
+yields the other ten instead of raising. It is also a pure function of bytes — no repository code is
+executed to understand it, which a regex-based or import-based approach could not promise.
+`app/services/indexing/parser.py` is the only module that imports it; the chunker works with a flat,
+language-neutral `SymbolNode`, so adding a grammar never reaches the chunker.
+
+**Synchronous indexing, and no queue.** A background worker would need a broker, a worker process,
+job state, and a progress channel — infrastructure this milestone does not need to prove the
+pipeline works. The cost is an open request, which the API and UI both state plainly. Adding a queue
+later changes the transport, not the pipeline.
+
+**Deliberately absent:** Redis, a queue, a vector database, embeddings, containers for the app
+processes. Each solves a problem this codebase does not have yet.
 
 ## Design notes
 
@@ -288,10 +481,10 @@ screens in this milestone, so each one names what will fill the space and why it
 
 ## Roadmap
 
-1. **GitHub integration** — OAuth, token storage, repository connection.
-2. **Repository ingestion** — fetch the default branch, walk files, track sync state.
-3. **Code parsing** — language-aware splitting into functions, classes and modules.
-4. **Embeddings** — embed the parsed units and persist vectors (`pgvector`).
+1. ~~**GitHub integration** — OAuth, token storage, repository connection.~~ **Done.**
+2. ~~**Repository ingestion** — fetch the default branch, walk files, track sync state.~~ **Done.**
+3. ~~**Code parsing** — language-aware splitting into functions, classes and modules.~~ **Done.**
+4. **Embeddings** — embed the parsed units and persist vectors (`pgvector`). ← next
 5. **Vector retrieval** — find the code that answers a question.
 6. **RAG** — grounded answers with citations rendered in the context panel.
 7. **Code-change generation** — turn an accepted answer into a concrete edit.

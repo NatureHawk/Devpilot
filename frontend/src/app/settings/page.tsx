@@ -6,12 +6,14 @@ import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ApiErrorState } from "@/components/ui/error-state";
 import { Panel, PanelHeader } from "@/components/ui/panel";
-import { getIntegrations, type Integration } from "@/lib/api";
+import { AccountSection } from "@/components/settings/account-section";
+import { getCurrentUser, getIntegrations, type Integration } from "@/lib/api";
 
 export const metadata: Metadata = { title: "Settings" };
 
 export default async function SettingsPage() {
-  const result = await getIntegrations();
+  const [result, currentUser] = await Promise.all([getIntegrations(), getCurrentUser()]);
+  const user = currentUser.ok ? currentUser.data : null;
   const integrations: Integration[] = result.ok ? result.data.integrations : [];
   const github = integrations.find((integration) => integration.name === "github");
   const aiProvider = integrations.find((integration) => integration.name === "ai_provider");
@@ -28,18 +30,7 @@ export default async function SettingsPage() {
 
           <Panel>
             <PanelHeader title="Account" />
-            <div className="divide-line divide-y">
-              <SettingsRow
-                label="Workspace"
-                description="DevPilot currently runs as a single local workspace. Accounts, sign-in and shared workspaces arrive with authentication."
-                control={<SettingsStatus>Local</SettingsStatus>}
-              />
-              <SettingsRow
-                label="Identity"
-                description="Your GitHub identity becomes the account identity once the GitHub connection is authorised."
-                control={<SettingsStatus>Not signed in</SettingsStatus>}
-              />
-            </div>
+            <AccountSection user={user} githubConfigured={github?.configured ?? false} />
           </Panel>
 
           <Panel>
@@ -71,8 +62,21 @@ export default async function SettingsPage() {
               />
               <SettingsRow
                 label="Authorisation"
-                description="Authorising the connection is what lets DevPilot read repository contents and open pull requests. The flow is not implemented yet, so no repository can be connected."
-                control={<SettingsStatus>Unavailable</SettingsStatus>}
+                description={
+                  user?.has_github_token
+                    ? "DevPilot holds an authorised GitHub token for your account. It is encrypted at rest and used only to read repository contents."
+                    : "Sign in with GitHub to authorise DevPilot to read repository contents on your behalf."
+                }
+                control={
+                  <SettingsStatus>
+                    {user?.has_github_token ? "Authorised" : "Not authorised"}
+                  </SettingsStatus>
+                }
+              />
+              <SettingsRow
+                label="Scopes"
+                description="DevPilot requests read access to your account and repositories. Write access is not requested in this milestone."
+                control={<SettingsStatus>read:user, repo</SettingsStatus>}
               />
             </div>
           </Panel>
@@ -100,8 +104,8 @@ export default async function SettingsPage() {
               />
               <SettingsRow
                 label="Repository access"
-                description="Write access is scoped to branches DevPilot creates. It never pushes to a default branch, and every change passes through review first."
-                control={<SettingsStatus>Branch only</SettingsStatus>}
+                description="Indexing only reads. Repository content is treated as untrusted data: nothing from a repository is executed, installed, or built."
+                control={<SettingsStatus>Read only</SettingsStatus>}
               />
             </div>
           </Panel>

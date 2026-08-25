@@ -5,10 +5,14 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Environment = Literal["local", "test", "staging", "production"]
+
+# Used only when SECRET_KEY is unset. Rejected outside local/test so a
+# deployment cannot accidentally sign sessions with a published value.
+DEV_SECRET_KEY = "devpilot-insecure-development-key"
 
 
 class Settings(BaseSettings):
@@ -40,10 +44,41 @@ class Settings(BaseSettings):
         default=["http://localhost:3000"], alias="CORS_ORIGINS"
     )
 
+    # Where to send the browser once the GitHub OAuth callback completes.
+    frontend_url: str = Field(default="http://localhost:3000", alias="NEXT_PUBLIC_APP_URL")
+
+    # Signs session cookies and OAuth state, and derives the key that encrypts
+    # stored GitHub tokens. Rotating it invalidates sessions and stored tokens.
+    secret_key: str = Field(default=DEV_SECRET_KEY, alias="SECRET_KEY")
+
     github_client_id: str = Field(default="", alias="GITHUB_CLIENT_ID")
     github_client_secret: str = Field(default="", alias="GITHUB_CLIENT_SECRET")
 
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+
+    # Overridable so tests can point the client at a local stand-in.
+    github_api_url: str = Field(default="https://api.github.com", alias="GITHUB_API_URL")
+    github_timeout_seconds: float = Field(default=20.0, alias="GITHUB_TIMEOUT_SECONDS")
+    # Concurrent blob downloads. GitHub tolerates modest parallelism; this is
+    # deliberately far below any rate limit.
+    github_max_concurrency: int = Field(default=8, ge=1, le=32, alias="GITHUB_MAX_CONCURRENCY")
+
+    # ---- Indexing limits -------------------------------------------------
+    # A file larger than this is recorded as skipped rather than downloaded.
+    # 512 KiB comfortably holds real source files; anything larger is usually
+    # generated, vendored or data.
+    index_max_file_bytes: int = Field(default=512_000, ge=1_000, alias="INDEX_MAX_FILE_BYTES")
+    # Ceiling on one repository's indexed source, so a large repository cannot
+    # exhaust memory or disk.
+    index_max_total_bytes: int = Field(
+        default=50_000_000, ge=100_000, alias="INDEX_MAX_TOTAL_BYTES"
+    )
+    index_max_files: int = Field(default=5_000, ge=1, alias="INDEX_MAX_FILES")
+    # Chunks longer than this are split; large enough to hold most functions.
+    index_max_chunk_chars: int = Field(default=8_000, ge=500, alias="INDEX_MAX_CHUNK_CHARS")
+    # Line window used when a file has no parseable structure, and when a single
+    # symbol exceeds the character limit.
+    index_fallback_chunk_lines: int = Field(default=120, ge=10, alias="INDEX_FALLBACK_CHUNK_LINES")
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -52,6 +87,12 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _require_real_secret_outside_development(self) -> Settings:
+        if not self.is_local and self.secret_key == DEV_SECRET_KEY:
+            raise ValueError("SECRET_KEY must be set to a unique value outside local development.")
+        return self
 
     @property
     def is_local(self) -> bool:

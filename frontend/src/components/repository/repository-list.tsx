@@ -10,7 +10,6 @@ const INDEXING_LABEL: Record<
   { label: string; tone: "neutral" | "accent" | "success" | "warning" | "danger" }
 > = {
   not_indexed: { label: "Not indexed", tone: "neutral" },
-  queued: { label: "Queued", tone: "warning" },
   indexing: { label: "Indexing", tone: "accent" },
   indexed: { label: "Indexed", tone: "success" },
   failed: { label: "Index failed", tone: "danger" },

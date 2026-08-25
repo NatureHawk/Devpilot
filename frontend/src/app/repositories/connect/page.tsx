@@ -2,24 +2,22 @@ import { ArrowLeft } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { ConnectForm } from "@/components/repository/connect-form";
+import { SignInPrompt } from "@/components/auth/sign-in-prompt";
 import { PageBody, PageHeader, PageTitle } from "@/components/layout/page-header";
-import { ButtonLink } from "@/components/ui/button";
 import { ApiErrorState } from "@/components/ui/error-state";
 import { Panel } from "@/components/ui/panel";
-import { getIntegrations } from "@/lib/api";
+import { getCurrentUser, getIntegrations } from "@/lib/api";
 
 export const metadata: Metadata = { title: "Connect repository" };
 
-/**
- * Connecting a repository requires the GitHub integration. Rather than showing
- * a form that cannot submit, this page reports the deployment's real
- * configuration state, which the backend answers from its own environment.
- */
 export default async function ConnectRepositoryPage() {
-  const result = await getIntegrations();
-  const github = result.ok
-    ? result.data.integrations.find((integration) => integration.name === "github")
+  const [integrations, user] = await Promise.all([getIntegrations(), getCurrentUser()]);
+
+  const github = integrations.ok
+    ? integrations.data.integrations.find((integration) => integration.name === "github")
     : undefined;
+  const signedIn = user.ok ? user.data : null;
 
   return (
     <>
@@ -41,32 +39,28 @@ export default async function ConnectRepositoryPage() {
         <div className="max-w-2xl">
           <h2 className="text-ink text-xl font-medium tracking-tight">Connect a repository</h2>
           <p className="text-ink-muted mt-2 text-sm leading-relaxed">
-            DevPilot reads repositories through GitHub. Authorising the connection lets it fetch
-            file contents, follow the default branch, and later open pull requests on your behalf.
+            DevPilot reads repositories through GitHub. Once connected, indexing parses the default
+            branch so questions can be answered from the code itself.
           </p>
         </div>
 
-        {!result.ok ? (
-          <ApiErrorState error={result.error} className="mt-6" />
+        {!integrations.ok ? (
+          <ApiErrorState error={integrations.error} className="mt-6" />
+        ) : !signedIn ? (
+          <SignInPrompt
+            className="mt-6"
+            redirectPath="/repositories/connect"
+            configured={github?.configured ?? false}
+          />
         ) : (
           <Panel className="mt-6 max-w-2xl">
             <div className="px-5 py-5">
-              <div className="flex items-center justify-between gap-4">
-                <h3 className="text-ink text-sm font-medium">GitHub</h3>
-                <span className="text-ink-faint text-xs">
-                  {github?.configured ? "Configured" : "Not configured"}
-                </span>
-              </div>
-              <p className="text-ink-muted mt-2 text-sm leading-relaxed">
-                {github?.configured
-                  ? "This deployment has GitHub credentials. The authorisation flow that turns them into a connected repository is the next milestone, so no repository can be added yet."
-                  : "This deployment has no GitHub credentials. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in the backend environment, then restart the API."}
+              <h3 className="text-ink text-sm font-medium">Repository</h3>
+              <p className="text-ink-muted mt-1 text-xs leading-relaxed">
+                Enter <code className="font-mono">owner/name</code>, or paste a GitHub URL. DevPilot
+                reads visibility and the default branch from GitHub itself.
               </p>
-              <div className="mt-5">
-                <ButtonLink href="/settings" variant="secondary" size="sm">
-                  Open GitHub settings
-                </ButtonLink>
-              </div>
+              <ConnectForm className="mt-4" />
             </div>
           </Panel>
         )}

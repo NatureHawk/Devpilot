@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, UniqueConstraint
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,13 +19,18 @@ class RepositoryVisibility(enum.StrEnum):
 class IndexingStatus(enum.StrEnum):
     """Lifecycle of the repository's searchable representation.
 
-    Only ``NOT_INDEXED`` is reachable in this milestone; the remaining values
-    exist because the column's meaning is part of the schema contract the
-    ingestion milestone will fill in.
+    Transitions are the only legal moves::
+
+        not_indexed -> indexing -> indexed
+        not_indexed -> indexing -> failed
+        indexed     -> indexing -> indexed | failed
+        failed      -> indexing -> indexed | failed
+
+    A failed run leaves any previously indexed rows untouched, so ``failed``
+    means "the newest attempt failed", not "there is no index".
     """
 
     NOT_INDEXED = "not_indexed"
-    QUEUED = "queued"
     INDEXING = "indexing"
     INDEXED = "indexed"
     FAILED = "failed"
@@ -63,6 +68,19 @@ class Repository(Base, UUIDPrimaryKey, Timestamps):
         default=IndexingStatus.NOT_INDEXED,
     )
     indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    indexing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The commit whose tree produced the current index. Lets a future run detect
+    # that nothing changed, and lets the UI say exactly what was indexed.
+    indexed_commit_sha: Mapped[str | None] = mapped_column(String(40))
+    # Operator-facing summary of the last failure. Never carries a token or a
+    # raw driver message; see IndexingError.safe_message.
+    indexing_error: Mapped[str | None] = mapped_column(Text)
+
+    # Counts from the last successful index, denormalised so the workspace
+    # header does not aggregate two large tables on every page load.
+    indexed_file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    indexed_parsed_file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    indexed_chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # The account that connected the repository. Shared access is modelled by a
     # membership table when multi-user workspaces land; a single owner column is

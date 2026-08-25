@@ -1,18 +1,38 @@
 import { Plus } from "lucide-react";
 import type { Metadata } from "next";
 
+import { SignInPrompt } from "@/components/auth/sign-in-prompt";
 import { PageBody, PageHeader, PageTitle } from "@/components/layout/page-header";
 import { RepositoryList } from "@/components/repository/repository-list";
 import { ButtonLink } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ApiErrorState } from "@/components/ui/error-state";
 import { Panel, PanelHeader } from "@/components/ui/panel";
-import { listRepositories } from "@/lib/api";
+import { getIntegrations, listRepositories } from "@/lib/api";
 
 export const metadata: Metadata = { title: "Repositories" };
 
 export default async function RepositoriesPage() {
   const result = await listRepositories();
+
+  // Signing in is a normal starting state, not an error to report.
+  if (!result.ok && result.error.code === "not_authenticated") {
+    const integrations = await getIntegrations();
+    const github = integrations.ok
+      ? integrations.data.integrations.find((integration) => integration.name === "github")
+      : undefined;
+
+    return (
+      <>
+        <PageHeader>
+          <PageTitle>Repositories</PageTitle>
+        </PageHeader>
+        <PageBody>
+          <SignInPrompt redirectPath="/repositories" configured={github?.configured ?? false} />
+        </PageBody>
+      </>
+    );
+  }
 
   return (
     <>
