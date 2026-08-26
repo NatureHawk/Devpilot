@@ -81,6 +81,10 @@ class Repository(Base, UUIDPrimaryKey, Timestamps):
     indexed_file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     indexed_parsed_file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     indexed_chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    indexed_embedding_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Which model produced the current vectors. Search compares against this, so
+    # changing models without re-indexing yields no results rather than wrong ones.
+    embedding_model: Mapped[str | None] = mapped_column(String(100))
 
     # The account that connected the repository. Shared access is modelled by a
     # membership table when multi-user workspaces land; a single owner column is

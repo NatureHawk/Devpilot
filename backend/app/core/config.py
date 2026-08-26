@@ -63,6 +63,28 @@ class Settings(BaseSettings):
     # deliberately far below any rate limit.
     github_max_concurrency: int = Field(default=8, ge=1, le=32, alias="GITHUB_MAX_CONCURRENCY")
 
+    # ---- Embeddings ------------------------------------------------------
+    # Voyage AI. voyage-code-3 is trained on source code, which matters more for
+    # retrieval quality here than a general-purpose text model would.
+    voyage_api_key: str = Field(default="", alias="VOYAGE_API_KEY")
+    embedding_model: str = Field(default="voyage-code-3", alias="EMBEDDING_MODEL")
+    # voyage-code-3 can emit 256/512/1024/2048; 1024 is its default and the
+    # balance we index at. The value is fixed per index: vectors of different
+    # widths are not comparable, so changing it requires a re-index.
+    embedding_dimensions: int = Field(default=1024, ge=64, le=4096, alias="EMBEDDING_DIMENSIONS")
+    # Voyage accepts up to 128 inputs per request; staying under it leaves room
+    # for the payload-size guard to trigger first on large chunks.
+    embedding_batch_size: int = Field(default=64, ge=1, le=128, alias="EMBEDDING_BATCH_SIZE")
+    embedding_timeout_seconds: float = Field(default=60.0, alias="EMBEDDING_TIMEOUT_SECONDS")
+    embedding_api_url: str = Field(
+        default="https://api.voyageai.com/v1/embeddings", alias="EMBEDDING_API_URL"
+    )
+
+    # ---- Retrieval -------------------------------------------------------
+    search_default_top_k: int = Field(default=8, ge=1, le=100, alias="SEARCH_DEFAULT_TOP_K")
+    # Hard ceiling so a client cannot ask for thousands of rows of source.
+    search_max_top_k: int = Field(default=50, ge=1, le=200, alias="SEARCH_MAX_TOP_K")
+
     # ---- Indexing limits -------------------------------------------------
     # A file larger than this is recorded as skipped rather than downloaded.
     # 512 KiB comfortably holds real source files; anything larger is usually
@@ -105,6 +127,15 @@ class Settings(BaseSettings):
     @property
     def ai_provider_configured(self) -> bool:
         return bool(self.anthropic_api_key)
+
+    @property
+    def embeddings_configured(self) -> bool:
+        """Whether this deployment can generate embeddings at all.
+
+        Checked before indexing and before search so the API can answer with a
+        configuration error rather than a provider exception.
+        """
+        return bool(self.voyage_api_key)
 
 
 @lru_cache(maxsize=1)

@@ -22,7 +22,9 @@ class IndexRunResponse(BaseModel):
     files_discovered: int = 0
     files_indexed: int = 0
     files_parsed: int = 0
-    chunks_created: int = 0
+    chunks_created: int
+    chunks_embedded: int = 0
+    embedding_model: str | None = None
     files_skipped: int = 0
     skipped_by_reason: dict[str, int] = Field(default_factory=dict)
     parse_failures: int = 0
@@ -44,7 +46,9 @@ class IndexStatusResponse(BaseModel):
     commit_sha: str | None = None
     files_indexed: int = 0
     files_parsed: int = 0
-    chunks_created: int = 0
+    chunks_created: int
+    chunks_embedded: int = 0
+    embedding_model: str | None = None
     started_at: datetime | None = None
     indexed_at: datetime | None = None
     error: str | None = None

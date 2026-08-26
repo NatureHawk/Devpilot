@@ -1,4 +1,6 @@
 import { IndexPanel, type IndexSummary } from "@/components/repository/index-panel";
+import { SearchInspector } from "@/components/repository/search-inspector";
+import { searchRepositoryAction } from "@/app/actions";
 import { NotConnectedState } from "@/components/repository/repository-states";
 import { ApiErrorState } from "@/components/ui/error-state";
 import { Panel, PanelHeader } from "@/components/ui/panel";
@@ -31,6 +33,14 @@ export default async function RepositoryOverviewPage({
   const languages =
     repository.indexing_status === "indexed" ? await getLanguages(repository.id) : null;
 
+  // Bound here so the client component cannot search a different repository
+  // than the one being viewed.
+  const repositoryId = repository.id;
+  async function searchAction(query: string) {
+    "use server";
+    return searchRepositoryAction(repositoryId, query);
+  }
+
   return (
     <Body>
       <div className="space-y-6">
@@ -40,6 +50,12 @@ export default async function RepositoryOverviewPage({
           name={repo}
           summary={toSummary(repository)}
         />
+
+        {/* Retrieval is only meaningful once vectors exist, so the inspector
+            appears with the index rather than as a permanently empty panel. */}
+        {repository.indexing_status === "indexed" ? (
+          <SearchInspector action={searchAction} />
+        ) : null}
 
         {languages?.ok && languages.data.length > 0 ? (
           <LanguagePanel languages={languages.data} />

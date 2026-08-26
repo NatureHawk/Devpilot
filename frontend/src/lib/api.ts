@@ -172,6 +172,8 @@ export type IndexRun = {
   files_indexed: number;
   files_parsed: number;
   chunks_created: number;
+  chunks_embedded: number;
+  embedding_model: string | null;
   files_skipped: number;
   skipped_by_reason: Record<string, number>;
   parse_failures: number;
@@ -182,6 +184,26 @@ export type IndexRun = {
 };
 
 export type LanguageCount = { language: string; file_count: number };
+
+export type SearchResult = {
+  chunk_id: string;
+  file_path: string;
+  language: string;
+  symbol: string | null;
+  parent_symbol: string | null;
+  chunk_type: string;
+  start_line: number;
+  end_line: number;
+  content: string;
+  /** Cosine similarity in [-1, 1]; a ranking signal, not a probability. */
+  score: number;
+};
+
+export type SearchResponse = {
+  results: SearchResult[];
+  model: string;
+  searched_chunks: number;
+};
 
 export function listRepositories(): Promise<ApiResult<ListResponse<Repository>>> {
   return request<ListResponse<Repository>>("/api/v1/repositories");
@@ -240,6 +262,17 @@ export function runIndex(repositoryId: string): Promise<ApiResult<IndexRun>> {
   return request<IndexRun>(`/api/v1/repositories/${repositoryId}/index`, {
     method: "POST",
     timeoutMs: INDEXING_TIMEOUT_MS,
+  });
+}
+
+export function searchRepository(
+  repositoryId: string,
+  query: string,
+  topK: number,
+): Promise<ApiResult<SearchResponse>> {
+  return request<SearchResponse>(`/api/v1/repositories/${repositoryId}/search`, {
+    method: "POST",
+    body: { query, top_k: topK },
   });
 }
 

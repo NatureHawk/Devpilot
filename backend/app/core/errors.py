@@ -77,6 +77,25 @@ def _render(
     return JSONResponse(status_code=status_code, content=body.model_dump(exclude_none=True))
 
 
+def _serialisable_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """Reduce Pydantic's error list to JSON-safe fields.
+
+    ``errors()`` embeds a ``ctx`` that holds the original exception object for
+    any custom validator, and ``input`` can be an arbitrary payload. Serialising
+    either raises, which would turn every custom-validator failure into a 500.
+    Only the location, message and type are useful to a client anyway, and none
+    of them can echo back a value the caller sent.
+    """
+    return [
+        {
+            "loc": [str(part) for part in error.get("loc", ())],
+            "msg": str(error.get("msg", "")),
+            "type": str(error.get("type", "")),
+        }
+        for error in exc.errors()
+    ]
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
@@ -88,7 +107,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "validation_error",
             "The request payload is invalid.",
-            {"errors": exc.errors()},
+            {"errors": _serialisable_validation_errors(exc)},
         )
 
     @app.exception_handler(StarletteHTTPException)

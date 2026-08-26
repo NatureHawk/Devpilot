@@ -137,7 +137,8 @@ transient GitHub outage never costs you a working index.
 
 ## Quick start
 
-**Requirements:** Node 20+, Python 3.11+, PostgreSQL 16.
+**Requirements:** Node 20+, Python 3.11+, PostgreSQL 16 with the
+[pgvector](https://github.com/pgvector/pgvector) extension.
 
 ```
 git clone https://github.com/NatureHawk/Devpilot.git
@@ -209,7 +210,72 @@ configured, never the credential itself.
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | OAuth app credentials. |
 | `BACKEND_URL` | Where Next.js reaches the API, server-side only. |
 | `NEXT_PUBLIC_APP_URL` | Public origin, used for OAuth redirects. |
-| `INDEX_*` / `GITHUB_*` | Indexing limits and GitHub client tuning. |
+| `VOYAGE_API_KEY` | Embedding provider credential. Without it, indexing and search report a configuration error rather than failing obscurely. |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | Model identity and vector width. Changing either requires a re-index. |
+| `INDEX_*` / `GITHUB_*` / `SEARCH_*` | Indexing limits, GitHub client tuning, retrieval bounds. |
+
+<br>
+
+## Semantic retrieval
+
+Indexing does not stop at chunks. Every chunk is turned into an **embedding** — a vector of numbers
+positioning it in a space where related meaning sits close together. That is what lets "where is
+authentication handled" find `verify_session()` even though the two share no words.
+
+```mermaid
+flowchart LR
+    A["Repository chunks"] --> B["Embedding model"]
+    B --> C[("pgvector")]
+    D["Question"] --> B
+    C --> E["Cosine similarity → top K"]
+```
+
+**Provider.** Voyage AI `voyage-code-3` at 1024 dimensions, behind a small `EmbeddingProvider`
+interface — the application never imports a provider SDK, so a local model can replace it later by
+implementing one protocol.
+
+**What gets embedded.** Not raw source. Each chunk is rendered as a deterministic representation
+carrying its repository, path, language, kind and qualified symbol above the code, so the model sees
+the vocabulary a question is likely to use. No LLM summarises anything: the representation is a pure
+function of stored fields, so re-embedding unchanged code produces identical vectors.
+
+**Queries and documents are embedded differently.** Retrieval models are asymmetric — a question and
+a piece of source are not the same kind of text — so the input kind is a required argument rather
+than a default that could silently degrade ranking.
+
+**Storage.** A `chunk_embeddings` table rather than a column on `code_chunks`: a chunk is meaningful
+before a vector exists, vector width belongs to the model rather than the chunk, and re-embedding
+under a new model becomes a delete-and-insert on one table. Each row records its model and
+dimensions, and search filters on the model the repository was actually indexed with — vectors from
+different models are not comparable, and this makes mixing them impossible rather than merely
+unlikely.
+
+**Similarity.** Cosine, via pgvector's `<=>` operator, with an HNSW index built on
+`vector_cosine_ops`. Cosine compares orientation rather than magnitude, which suits text embeddings
+where vector length reflects little of interest. Scores are reported as `1 - distance`, so higher is
+nearer.
+
+> A score is a **ranking signal, not a probability**. It is meaningful for ordering results against
+> each other, not as an absolute relevance threshold — there is no calibrated cutoff above which a
+> result is "correct".
+
+**Top-K.** Defaults to 8, bounded to 50. Ordering and limiting happen in the database on the indexed
+distance expression, so only the returned rows ever materialise their source content.
+
+**Indexing is atomic across embeddings.** A repository reaches `indexed` only after its vectors are
+stored, so that state means *searchable*, not merely *parsed*. If the provider fails, the attempt is
+marked `failed` and the previous index is left intact. Re-indexing replaces vectors wholesale, so old
+and new embeddings never mix.
+
+### Retrieval inspector
+
+The repository workspace includes a search inspector: a query box that shows the ranked chunks with
+their similarity scores, symbols and line ranges, each expandable to its source. It is an
+engineering instrument, not a chat interface — retrieval quality is worth judging on its own, before
+any model is asked to write prose over it.
+
+**This milestone implements semantic retrieval, not answer generation.** Search returns code. No
+language model is invoked at query time.
 
 <br>
 
@@ -221,6 +287,7 @@ configured, never the credential itself.
 | `repositories` | Connected repositories and their indexing state, commit SHA and counts. |
 | `files` | One row per indexed path, with content, language and parse outcome. |
 | `code_chunks` | Structural chunks with symbol, parent symbol, line and byte ranges. |
+| `chunk_embeddings` | One pgvector embedding per chunk per model, with its dimensions. |
 | `conversations` / `messages` | Question threads scoped to a repository. |
 
 Design decisions worth naming:
@@ -251,6 +318,7 @@ isn't — deleting a user doesn't delete the repositories they connected.
 | `POST /api/v1/repositories` | Connect a repository by `owner/name`. |
 | `GET /api/v1/repositories/{owner}/{name}` | One repository. |
 | `POST /api/v1/repositories/{id}/index` | Index a repository. |
+| `POST /api/v1/repositories/{id}/search` | Semantic search over indexed chunks. |
 
 Every failure returns the same envelope, so clients branch on a code rather than parsing prose:
 
@@ -290,8 +358,9 @@ Pydantic gives one schema that is also the OpenAPI contract. `select()` keeps qu
 SQL instead of hiding them. Sessions are synchronous and routes are declared `def`, so they run in
 FastAPI's threadpool and the query path stays easy to reason about.
 
-**PostgreSQL.** Relational data with real foreign keys, and `pgvector` when embeddings arrive —
-retrieval won't need a second datastore.
+**PostgreSQL with pgvector.** Relational data and vector search in one datastore. Retrieval filters
+by repository and model before ranking, which is a plain SQL `WHERE` — with a separate vector
+database that becomes a cross-system join.
 
 **No AI frameworks.** No LangChain, no agent framework, no vector-database SDK. Direct calls and
 small owned abstractions, so every layer stays inspectable.

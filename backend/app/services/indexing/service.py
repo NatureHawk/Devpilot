@@ -37,7 +37,9 @@ from app.integrations.github.models import TreeEntry
 from app.models.repository import IndexingStatus, Repository
 from app.models.source import ChunkType, CodeChunk, SourceFile
 from app.repositories import index_repo
+from app.services.embeddings import EmbeddingNotConfiguredError, get_provider
 from app.services.indexing.chunker import ChunkingLimits, chunk_file
+from app.services.indexing.embedder import embed_repository_chunks
 from app.services.indexing.filters import (
     FileFilter,
     FilterLimits,
@@ -82,6 +84,8 @@ class IndexingReport:
     files_skipped: int = 0
     skipped_by_reason: dict[str, int] = field(default_factory=dict)
     parse_failures: int = 0
+    chunks_embedded: int = 0
+    embedding_model: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None
@@ -122,6 +126,13 @@ def index_repository(
     The caller waits for the whole run: this milestone has no worker
     infrastructure, and pretending otherwise would be a lie in the API.
     """
+    # Checked before any network work: a missing key should cost nothing and
+    # produce a configuration error, not a half-finished run.
+    if not settings.embeddings_configured:
+        raise EmbeddingNotConfiguredError(
+            "No embedding provider is configured, so this repository cannot be made searchable."
+        )
+
     _claim_run(session, repository)
 
     started_at = repository.indexing_started_at or datetime.now(UTC)
@@ -155,12 +166,13 @@ def index_repository(
 
     logger.info(
         "Indexing completed repository_id=%s commit=%s files=%d parsed=%d chunks=%d "
-        "skipped=%d parse_failures=%d",
+        "embedded=%d skipped=%d parse_failures=%d",
         repository.id,
         report.commit_sha,
         report.files_indexed,
         report.files_parsed,
         report.chunks_created,
+        report.chunks_embedded,
         report.files_skipped,
         report.parse_failures,
     )
@@ -290,6 +302,19 @@ def _run(
 
     session.flush()
 
+    # ---- embeddings ------------------------------------------------------
+    # Part of the run, not a follow-up: "indexed" has to mean "searchable", so a
+    # provider failure here fails the whole attempt and leaves the previous
+    # index in place.
+    embedding_report = embed_repository_chunks(
+        session,
+        repository_id=repository.id,
+        repository_full_name=f"{repository.owner}/{repository.name}",
+        provider=get_provider(settings),
+    )
+    report.chunks_embedded = embedding_report.chunks_embedded
+    report.embedding_model = embedding_report.model
+
     # ---- completion ------------------------------------------------------
     repository = session.merge(repository)
     completed_at = datetime.now(UTC)
@@ -300,6 +325,8 @@ def _run(
     repository.indexed_file_count = report.files_indexed
     repository.indexed_parsed_file_count = report.files_parsed
     repository.indexed_chunk_count = report.chunks_created
+    repository.indexed_embedding_count = report.chunks_embedded
+    repository.embedding_model = report.embedding_model
 
     session.commit()
 

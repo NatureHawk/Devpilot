@@ -8,8 +8,10 @@ import {
   connectRepository,
   getAuthorizeUrl,
   runIndex,
+  searchRepository,
   SESSION_COOKIE,
   type ApiError,
+  type SearchResponse,
 } from "@/lib/api";
 import { repositoryPath } from "@/lib/navigation";
 
@@ -75,6 +77,7 @@ export type IndexOutcome = {
   filesIndexed: number;
   filesParsed: number;
   chunksCreated: number;
+  chunksEmbedded: number;
   filesSkipped: number;
   parseFailures: number;
   complete: boolean;
@@ -100,10 +103,33 @@ export async function indexRepositoryAction(
       filesIndexed: run.files_indexed,
       filesParsed: run.files_parsed,
       chunksCreated: run.chunks_created,
+      chunksEmbedded: run.chunks_embedded,
       filesSkipped: run.files_skipped,
       parseFailures: run.parse_failures,
       complete: run.complete,
       commitSha: run.commit_sha,
     },
   };
+}
+
+/**
+ * Retrieval only — this action embeds the query and ranks stored vectors. No
+ * language model is called, and nothing is written to the database.
+ */
+export async function searchRepositoryAction(
+  repositoryId: string,
+  query: string,
+  topK = 8,
+): Promise<ActionResult<SearchResponse>> {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      error: { code: "validation_error", message: "Enter a question to search for." },
+    };
+  }
+
+  const result = await searchRepository(repositoryId, trimmed, topK);
+  if (!result.ok) return failure(result.error);
+  return { ok: true, data: result.data };
 }

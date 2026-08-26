@@ -18,6 +18,8 @@ from app.repositories import index_repo, repository_repo
 from app.schemas.common import ListResponse
 from app.schemas.indexing import IndexRunResponse, IndexStatusResponse, LanguageCount
 from app.schemas.repository import RepositoryConnectRequest, RepositoryRead
+from app.schemas.search import SearchRequest, SearchResponse, SearchResult
+from app.services import search as search_service
 from app.services.indexing.service import index_repository
 
 router = APIRouter(prefix="/repositories", tags=["repositories"])
@@ -122,6 +124,8 @@ def index(
         files_indexed=report.files_indexed,
         files_parsed=report.files_parsed,
         chunks_created=report.chunks_created,
+        chunks_embedded=report.chunks_embedded,
+        embedding_model=report.embedding_model,
         files_skipped=report.files_skipped,
         skipped_by_reason=report.skipped_by_reason,
         parse_failures=report.parse_failures,
@@ -153,6 +157,8 @@ def index_status(
         files_indexed=repository.indexed_file_count,
         files_parsed=repository.indexed_parsed_file_count,
         chunks_created=repository.indexed_chunk_count,
+        chunks_embedded=repository.indexed_embedding_count,
+        embedding_model=repository.embedding_model,
         started_at=repository.indexing_started_at,
         indexed_at=repository.indexed_at,
         error=repository.indexing_error,
@@ -193,3 +199,41 @@ def get_repository(session: DbSession, owner: str, name: str) -> RepositoryRead:
             details={"owner": owner, "name": name},
         )
     return RepositoryRead.model_validate(row)
+
+
+@router.post(
+    "/{repository_id}/search",
+    response_model=SearchResponse,
+    summary="Semantic search over a repository's indexed code",
+    responses={
+        404: {"model": ErrorResponse, "description": "Repository is not connected"},
+        409: {"model": ErrorResponse, "description": "Repository is not indexed or not searchable"},
+        501: {"model": ErrorResponse, "description": "No embedding provider is configured"},
+    },
+)
+def search_repository_route(
+    session: DbSession,
+    settings: AppSettings,
+    user: CurrentUser,
+    repository_id: uuid.UUID,
+    payload: SearchRequest,
+) -> SearchResponse:
+    """Retrieve the chunks most similar to a question.
+
+    Retrieval only — no language model is involved in producing this response.
+    """
+    repository = _require_repository(session, repository_id, user)
+
+    outcome = search_service.search_repository(
+        session,
+        repository=repository,
+        query=payload.query,
+        top_k=payload.top_k,
+        settings=settings,
+    )
+
+    return SearchResponse(
+        results=[SearchResult.model_validate(hit) for hit in outcome.results],
+        model=outcome.model,
+        searched_chunks=outcome.query_chunk_count,
+    )
