@@ -6,11 +6,14 @@ import { revalidatePath } from "next/cache";
 
 import {
   connectRepository,
+  createChange,
   getAuthorizeUrl,
+  reviewChange,
   runIndex,
   searchRepository,
   SESSION_COOKIE,
   type ApiError,
+  type ProposedChange,
   type SearchResponse,
 } from "@/lib/api";
 import { repositoryPath } from "@/lib/navigation";
@@ -131,5 +134,46 @@ export async function searchRepositoryAction(
 
   const result = await searchRepository(repositoryId, trimmed, topK);
   if (!result.ok) return failure(result.error);
+  return { ok: true, data: result.data };
+}
+
+/**
+ * Investigate a change request and produce a proposal.
+ *
+ * Runs the bounded tool loop server-side and returns a patch for review.
+ * Nothing is written to GitHub — approval is an application state.
+ */
+export async function proposeChangeAction(
+  repositoryId: string,
+  owner: string,
+  name: string,
+  request: string,
+): Promise<ActionResult<ProposedChange>> {
+  const trimmed = request.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      error: { code: "validation_error", message: "Describe the change you want." },
+    };
+  }
+
+  const result = await createChange(repositoryId, trimmed);
+  if (!result.ok) return failure(result.error);
+
+  revalidatePath(repositoryPath(owner, name, "changes"));
+  return { ok: true, data: result.data };
+}
+
+/** Record a human decision on a proposal. */
+export async function reviewChangeAction(
+  changeId: string,
+  decision: "approve" | "reject",
+  owner: string,
+  name: string,
+): Promise<ActionResult<ProposedChange>> {
+  const result = await reviewChange(changeId, decision);
+  if (!result.ok) return failure(result.error);
+
+  revalidatePath(repositoryPath(owner, name, "changes"));
   return { ok: true, data: result.data };
 }

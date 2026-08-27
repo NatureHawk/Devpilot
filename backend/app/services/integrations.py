@@ -15,6 +15,13 @@ def describe_integrations(settings: Settings) -> IntegrationsResponse:
                 description=("Reads repository contents and opens pull requests on your behalf."),
             ),
             IntegrationStatus(
+                name="embeddings",
+                configured=settings.embeddings_configured,
+                description=(
+                    "Turns repository code into vectors so it can be searched by meaning."
+                ),
+            ),
+            IntegrationStatus(
                 name="ai_provider",
                 configured=settings.ai_provider_configured,
                 description=("Generates repository-grounded answers and proposed code changes."),

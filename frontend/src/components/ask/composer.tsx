@@ -32,9 +32,14 @@ const serverModifier = () => "Ctrl";
 export function Composer({
   disabledReason,
   handleRef,
+  onSubmit,
+  busy = false,
 }: {
   disabledReason: string | null;
   handleRef?: Ref<ComposerHandle>;
+  /** Absent while answering is unavailable, which is what keeps send inert. */
+  onSubmit?: (question: string) => void;
+  busy?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
@@ -55,7 +60,13 @@ export function Composer({
     textarea.style.height = `${Math.min(textarea.scrollHeight, MAX_ROWS_HEIGHT)}px`;
   }, [value]);
 
-  const canSend = value.trim().length > 0 && disabledReason === null;
+  const canSend = value.trim().length > 0 && disabledReason === null && !busy && !!onSubmit;
+
+  const submit = () => {
+    if (!canSend || !onSubmit) return;
+    onSubmit(value.trim());
+    setValue("");
+  };
 
   return (
     <div className="border-line bg-surface border-t py-3">
@@ -76,6 +87,14 @@ export function Composer({
             rows={2}
             value={value}
             onChange={(event) => setValue(event.target.value)}
+            onKeyDown={(event) => {
+              // Ctrl/Cmd+Enter sends; a bare Enter inserts a newline, because
+              // questions about code are often multi-line.
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                submit();
+              }
+            }}
             placeholder="Ask about this repository…"
             spellCheck={false}
             className="text-ink placeholder:text-ink-faint block w-full resize-none bg-transparent px-3 py-2.5 text-sm focus:outline-none"
@@ -88,6 +107,7 @@ export function Composer({
             </span>
             <button
               type="button"
+              onClick={submit}
               disabled={!canSend}
               aria-label="Send question"
               aria-describedby={disabledReason ? "composer-availability" : undefined}

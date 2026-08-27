@@ -80,6 +80,41 @@ class Settings(BaseSettings):
         default="https://api.voyageai.com/v1/embeddings", alias="EMBEDDING_API_URL"
     )
 
+    # ---- Language model --------------------------------------------------
+    # Answer generation and code-change investigation. Separate from the
+    # embedding provider: they are different models with different failure modes.
+    llm_model: str = Field(default="claude-opus-5", alias="LLM_MODEL")
+    # Streaming is always used, so this can be generous without risking an HTTP
+    # timeout; it bounds a runaway answer rather than shaping a normal one.
+    llm_max_output_tokens: int = Field(
+        default=8_000, ge=256, le=64_000, alias="LLM_MAX_OUTPUT_TOKENS"
+    )
+    llm_timeout_seconds: float = Field(default=120.0, alias="LLM_TIMEOUT_SECONDS")
+    # Thinking depth. "high" is the default for intelligence-sensitive work;
+    # investigation runs benefit from more, plain Q&A rarely needs it.
+    llm_effort: str = Field(default="high", alias="LLM_EFFORT")
+
+    # ---- Context budget --------------------------------------------------
+    # Ceiling on retrieved source sent to the model, in characters. Chosen as a
+    # character budget rather than tokens because tokenising every chunk to make
+    # a packing decision costs more than the headroom it would buy.
+    context_max_chars: int = Field(default=60_000, ge=2_000, alias="CONTEXT_MAX_CHARS")
+    # Recent turns replayed for follow-up questions. Bounded so a long thread
+    # cannot crowd out the repository evidence, which is the point of the answer.
+    conversation_history_turns: int = Field(
+        default=6, ge=0, le=40, alias="CONVERSATION_HISTORY_TURNS"
+    )
+
+    # ---- Investigation agent ---------------------------------------------
+    # Hard ceiling on tool calls in one change request. The loop is bounded, not
+    # open-ended: it investigates and proposes, it does not roam.
+    agent_max_tool_calls: int = Field(default=8, ge=1, le=25, alias="AGENT_MAX_TOOL_CALLS")
+    agent_max_steps: int = Field(default=10, ge=1, le=30, alias="AGENT_MAX_STEPS")
+    # Total source a single investigation may pull in through tools.
+    agent_max_tool_output_chars: int = Field(
+        default=120_000, ge=5_000, alias="AGENT_MAX_TOOL_OUTPUT_CHARS"
+    )
+
     # ---- Retrieval -------------------------------------------------------
     search_default_top_k: int = Field(default=8, ge=1, le=100, alias="SEARCH_DEFAULT_TOP_K")
     # Hard ceiling so a client cannot ask for thousands of rows of source.
@@ -126,6 +161,15 @@ class Settings(BaseSettings):
 
     @property
     def ai_provider_configured(self) -> bool:
+        return bool(self.anthropic_api_key)
+
+    @property
+    def llm_configured(self) -> bool:
+        """Whether answer generation is possible in this deployment.
+
+        Checked before any retrieval work so an unconfigured deployment reports
+        a configuration state instead of doing work it cannot finish.
+        """
         return bool(self.anthropic_api_key)
 
     @property

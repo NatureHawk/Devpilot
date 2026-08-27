@@ -210,6 +210,9 @@ configured, never the credential itself.
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | OAuth app credentials. |
 | `BACKEND_URL` | Where Next.js reaches the API, server-side only. |
 | `NEXT_PUBLIC_APP_URL` | Public origin, used for OAuth redirects. |
+| `ANTHROPIC_API_KEY` | Language model credential. Without it, Ask and Changes report a configuration state rather than failing obscurely. |
+| `LLM_MODEL` / `LLM_EFFORT` | Model identity and thinking depth. Defaults to `claude-opus-5` at `high`. |
+| `AGENT_MAX_TOOL_CALLS` | Investigation tool budget. Defaults to 8. |
 | `VOYAGE_API_KEY` | Embedding provider credential. Without it, indexing and search report a configuration error rather than failing obscurely. |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | Model identity and vector width. Changing either requires a re-index. |
 | `INDEX_*` / `GITHUB_*` / `SEARCH_*` | Indexing limits, GitHub client tuning, retrieval bounds. |
@@ -279,6 +282,108 @@ language model is invoked at query time.
 
 <br>
 
+## Grounded answers
+
+Retrieval finds the code; the model explains it. Both halves are visible, and the
+answer is tied back to the evidence it came from.
+
+```mermaid
+flowchart LR
+    Q["Question"] --> E["Embedding"]
+    E --> V[("pgvector")]
+    V --> R["Retrieved chunks"]
+    R --> C["Context builder"]
+    C --> L["Claude"]
+    L --> A["Answer + citations"]
+```
+
+**Why retrieval happens first.** A model with no view of your repository answers from
+what codebases usually look like, which is how invented file paths get written with
+total confidence. Retrieving first means every claim has something behind it, and the
+absence of evidence becomes visible rather than being papered over.
+
+**Why citations matter.** The model writes `[S1]` inline; the UI turns each into a
+control that opens the exact file, symbol and line range it refers to. A claim you
+cannot trace is a claim you cannot check — citations are what make an answer auditable
+instead of merely plausible.
+
+**Context construction.** Retrieved chunks are deduplicated, grouped by file, labelled
+for citation, and packed against a character budget, highest-ranked first. Nothing is
+summarised by a model before the answer — that would add a second call, a second cost,
+and a second place for detail to go missing.
+
+**Honest uncertainty.** Retrieval strength is classified as `none`, `weak` or `useful`
+from the top score, the result count and file diversity, and the prompt is adjusted to
+match. These are not probabilities — cosine similarity is not calibrated — so they only
+decide how firmly the answer states that evidence is thin. Asked about a component that
+does not exist, DevPilot says the repository does not show one rather than inventing a
+path.
+
+**Streaming.** Sources are sent first, then answer text as the model produces it. The
+backend streams from the provider and forwards each increment; nothing is buffered and
+replayed as a typing effect.
+
+<br>
+
+## Proposed changes
+
+A change request is an investigation, not a single prompt.
+
+```mermaid
+flowchart LR
+    RQ["Request"] --> RE["Retrieval"]
+    RE --> T["Bounded tools"]
+    T --> P["Change plan"]
+    P --> PA["Validated patch"]
+    PA --> D["Unified diff"]
+    D --> H["Human approval"]
+```
+
+The model gets three read-only tools — `search_code`, `read_file`, `find_symbol` — all
+reading the indexed snapshot already in PostgreSQL. There is no write tool, no shell,
+and no filesystem access.
+
+**Why tools are bounded.** Every dimension is capped: **8 tool calls**, 10 model steps,
+and a total tool-output budget. When the budget is spent the tools are withdrawn from
+the request, so the next turn is necessarily the proposal. The loop terminates because
+it structurally cannot do otherwise.
+
+**Patches are anchored to content, not line numbers.** The model quotes the text it
+wants to replace, and that text must appear **exactly once** in the file as indexed.
+Zero matches or several are both refused — applying to the first of three matches could
+silently change the wrong code. The model may only edit files it actually opened during
+its investigation.
+
+**Stale snapshots.** A proposal records the commit its patch was built against. If the
+repository is re-indexed while it waits, it is marked `stale` and cannot be approved.
+The check runs when a proposal is read and again at approval, because the repository can
+move at any point in between.
+
+**Why Git writes are excluded here.** Approval is an application state. DevPilot creates
+no branches, commits or pull requests in this milestone. Getting the review surface right
+is the whole point of the step, and shipping the write path at the same time would mean
+trusting a review workflow nobody had used yet.
+
+<br>
+
+## Security model
+
+Repository content is attacker-controlled. Anyone who can open a pull request can put
+text in a file that DevPilot will later read.
+
+| Control | How |
+| --- | --- |
+| **Prompt injection** | The system prompt establishes that repository content is data, never instructions. Retrieved code arrives only inside labelled evidence blocks in user messages — never in the system prompt. A file saying "ignore previous instructions" is quoted text. |
+| **No code execution** | DevPilot reads files. It never runs repository code, installs dependencies, executes build commands, or shells out. Proposed tests are proposed — the UI says they have not been run, because there is no sandbox to run them in. |
+| **Repository isolation** | Every tool query is scoped to the repository under investigation. `read_file` resolves paths against indexed rows, so `../../etc/passwd` matches nothing — traversal is impossible by construction rather than by filtering. |
+| **Authorization** | A repository connected by someone else reads as missing, not forbidden, so an id is never confirmed to exist. |
+| **Secrets** | Credentials live in the backend environment and are read there. Tokens are encrypted at rest with a key derived from `SECRET_KEY`. Provider error bodies are logged, never returned — they can echo request content, which here includes source. |
+| **Output rendering** | Answers, diffs and excerpts are rendered as text. Nothing from a repository is ever interpreted as markup. |
+
+<br>
+
+<br>
+
 ## Data model
 
 | Table | Holds |
@@ -288,6 +393,8 @@ language model is invoked at query time.
 | `files` | One row per indexed path, with content, language and parse outcome. |
 | `code_chunks` | Structural chunks with symbol, parent symbol, line and byte ranges. |
 | `chunk_embeddings` | One pgvector embedding per chunk per model, with its dimensions. |
+| `message_sources` | Citations: which chunk an answer drew on, with its location copied so it survives a re-index. |
+| `proposed_changes` | Change requests, their investigation, validated edits, diff and review status. |
 | `conversations` / `messages` | Question threads scoped to a repository. |
 
 Design decisions worth naming:
@@ -319,6 +426,10 @@ isn't — deleting a user doesn't delete the repositories they connected.
 | `GET /api/v1/repositories/{owner}/{name}` | One repository. |
 | `POST /api/v1/repositories/{id}/index` | Index a repository. |
 | `POST /api/v1/repositories/{id}/search` | Semantic search over indexed chunks. |
+| `POST /api/v1/repositories/{id}/ask` | Grounded answer, streamed as server-sent events. |
+| `GET /api/v1/repositories/{id}/conversations` | Conversation history. |
+| `POST /api/v1/repositories/{id}/changes` | Investigate a request and propose a patch. |
+| `POST /api/v1/changes/{id}/approve` · `/reject` | Record a human decision. |
 
 Every failure returns the same envelope, so clients branch on a code rather than parsing prose:
 

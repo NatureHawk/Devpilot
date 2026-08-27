@@ -14,7 +14,7 @@ def test_integrations_endpoint_lists_known_integrations(client: TestClient) -> N
     assert response.status_code == 200
 
     names = {item["name"] for item in response.json()["integrations"]}
-    assert names == {"github", "ai_provider"}
+    assert names == {"github", "embeddings", "ai_provider"}
 
 
 @pytest.mark.parametrize(

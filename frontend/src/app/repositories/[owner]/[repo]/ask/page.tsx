@@ -1,6 +1,4 @@
-import { ContextPanel } from "@/components/ask/context-panel";
-import { ContextRail } from "@/components/ask/context-rail";
-import { ConversationPane } from "@/components/ask/conversation-pane";
+import { AskWorkspace } from "@/components/ask/ask-workspace";
 import { getIntegrations, type ApiResult, type Repository } from "@/lib/api";
 import { decodeParams, loadRepository, type RepositoryParams } from "@/lib/repository-context";
 
@@ -11,6 +9,7 @@ import { decodeParams, loadRepository, type RepositoryParams } from "@/lib/repos
 function blockingReason(
   repositoryResult: ApiResult<Repository>,
   aiConfigured: boolean,
+  embeddingsConfigured: boolean,
 ): string | null {
   if (!repositoryResult.ok) {
     return repositoryResult.error.code === "not_found"
@@ -20,8 +19,11 @@ function blockingReason(
   if (repositoryResult.data.indexing_status !== "indexed") {
     return "Index this repository so DevPilot can retrieve the code an answer depends on.";
   }
+  if (!embeddingsConfigured) {
+    return "No embedding provider is configured, so the repository cannot be searched.";
+  }
   if (!aiConfigured) {
-    return "No AI provider is configured for this deployment.";
+    return "No language model is configured for this deployment.";
   }
   return null;
 }
@@ -33,16 +35,19 @@ export default async function AskPage({ params }: { params: Promise<RepositoryPa
     getIntegrations(),
   ]);
 
-  const aiConfigured = integrationsResult.ok
-    ? (integrationsResult.data.integrations.find((i) => i.name === "ai_provider")?.configured ??
-      false)
-    : false;
+  const integrations = integrationsResult.ok ? integrationsResult.data.integrations : [];
+  const configured = (name: string) =>
+    integrations.find((integration) => integration.name === name)?.configured ?? false;
+  const aiConfigured = configured("ai_provider");
+  const embeddingsConfigured = configured("embeddings");
+
+  const repository = repositoryResult.ok ? repositoryResult.data : null;
 
   return (
-    <div className="flex min-h-0 flex-1">
-      <ContextRail repository={repositoryResult.ok ? repositoryResult.data : null} />
-      <ConversationPane disabledReason={blockingReason(repositoryResult, aiConfigured)} />
-      <ContextPanel />
-    </div>
+    <AskWorkspace
+      repository={repository}
+      repositoryId={repository?.id ?? null}
+      disabledReason={blockingReason(repositoryResult, aiConfigured, embeddingsConfigured)}
+    />
   );
 }

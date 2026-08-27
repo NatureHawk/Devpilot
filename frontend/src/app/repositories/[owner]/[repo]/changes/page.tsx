@@ -1,67 +1,61 @@
-import { Check, Eye, GitCommitHorizontal } from "lucide-react";
-
+import { ChangesWorkspace } from "@/components/changes/changes-workspace";
 import { NotConnectedState } from "@/components/repository/repository-states";
 import { ApiErrorState } from "@/components/ui/error-state";
-import { Panel, PanelHeader } from "@/components/ui/panel";
+import { getIntegrations, listChanges } from "@/lib/api";
 import { decodeParams, loadRepository, type RepositoryParams } from "@/lib/repository-context";
 
-const REVIEW_STEPS = [
-  {
-    icon: Eye,
-    title: "Read the diff",
-    detail: "Every proposed edit is shown as a file-by-file diff before it exists anywhere else.",
-  },
-  {
-    icon: Check,
-    title: "Approve or reject",
-    detail: "Nothing is applied without an explicit decision from you on each change.",
-  },
-  {
-    icon: GitCommitHorizontal,
-    title: "Commit to a branch",
-    detail: "Approved changes are committed to a branch — never straight to the default one.",
-  },
-] as const;
+/** Names the first thing standing between the user and a proposal. */
+function blockingReason(indexed: boolean, llmConfigured: boolean, embeddings: boolean) {
+  if (!indexed) return "Index this repository before requesting changes.";
+  if (!embeddings) return "No embedding provider is configured, so the code cannot be searched.";
+  if (!llmConfigured) return "No language model is configured for this deployment.";
+  return null;
+}
 
 export default async function ChangesPage({ params }: { params: Promise<RepositoryParams> }) {
   const { owner, repo } = decodeParams(await params);
   const result = await loadRepository(owner, repo);
 
-  return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8">
-        {!result.ok ? (
-          result.error.code === "not_found" ? (
+  if (!result.ok) {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-5xl px-6 py-8">
+          {result.error.code === "not_found" ? (
             <NotConnectedState owner={owner} repo={repo} />
           ) : (
             <ApiErrorState error={result.error} />
-          )
-        ) : (
-          <Panel>
-            <PanelHeader
-              title="No proposed changes"
-              description="AI-generated modifications will appear here for review before anything is written back to the repository."
-            />
+          )}
+        </div>
+      </div>
+    );
+  }
 
-            {/* The review contract, stated up front: this is the step that keeps
-                a human between a generated edit and the repository. */}
-            <ul className="divide-line grid grid-cols-1 divide-y md:grid-cols-3 md:divide-x md:divide-y-0">
-              {REVIEW_STEPS.map(({ icon: Icon, title, detail }) => (
-                <li key={title} className="px-5 py-5">
-                  <Icon aria-hidden="true" className="text-ink-faint size-4" strokeWidth={1.75} />
-                  <h3 className="text-ink mt-3 text-sm font-medium">{title}</h3>
-                  <p className="text-ink-muted mt-1 text-xs leading-relaxed">{detail}</p>
-                </li>
-              ))}
-            </ul>
+  const repository = result.data;
+  const [changesResult, integrationsResult] = await Promise.all([
+    listChanges(repository.id),
+    getIntegrations(),
+  ]);
 
-            <div className="border-line border-t px-5 py-3">
-              <p className="text-2xs text-ink-faint">
-                DevPilot never writes to a repository without an approved review.
-              </p>
-            </div>
-          </Panel>
-        )}
+  const integrations = integrationsResult.ok ? integrationsResult.data.integrations : [];
+  const configured = (name: string) =>
+    integrations.find((integration) => integration.name === name)?.configured ?? false;
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-5xl px-6 py-8">
+        {!changesResult.ok ? <ApiErrorState error={changesResult.error} className="mb-6" /> : null}
+
+        <ChangesWorkspace
+          repositoryId={repository.id}
+          owner={owner}
+          name={repo}
+          initialChanges={changesResult.ok ? changesResult.data.items : []}
+          disabledReason={blockingReason(
+            repository.indexing_status === "indexed",
+            configured("ai_provider"),
+            configured("embeddings"),
+          )}
+        />
       </div>
     </div>
   );

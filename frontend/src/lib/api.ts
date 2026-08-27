@@ -148,7 +148,7 @@ export type Repository = {
 
 export type ListResponse<T> = { items: T[]; total: number };
 
-export type IntegrationName = "github" | "ai_provider";
+export type IntegrationName = "github" | "embeddings" | "ai_provider";
 
 export type Integration = {
   name: IntegrationName;
@@ -274,6 +274,61 @@ export function searchRepository(
     method: "POST",
     body: { query, top_k: topK },
   });
+}
+
+export type ChangeStatus = "proposed" | "approved" | "rejected" | "stale" | "failed";
+
+export type ToolActivity = {
+  tool: string;
+  duration_ms: number;
+  ok: boolean;
+  detail: string;
+};
+
+export type ProposedChange = {
+  id: string;
+  repository_id: string;
+  conversation_id: string | null;
+  status: ChangeStatus;
+  request: string;
+  summary: string;
+  diff: string;
+  files_changed: number;
+  tool_calls_used: number;
+  indexed_commit_sha: string | null;
+  model: string | null;
+  error: string | null;
+  investigation: ToolActivity[];
+  created_at: string;
+  reviewed_at: string | null;
+};
+
+export function listChanges(
+  repositoryId: string,
+): Promise<ApiResult<ListResponse<ProposedChange>>> {
+  return request<ListResponse<ProposedChange>>(
+    `/api/v1/repositories/${repositoryId}/changes`,
+  );
+}
+
+export function createChange(
+  repositoryId: string,
+  changeRequest: string,
+): Promise<ApiResult<ProposedChange>> {
+  return request<ProposedChange>(`/api/v1/repositories/${repositoryId}/changes`, {
+    method: "POST",
+    body: { request: changeRequest },
+    // Investigation runs several model turns; it needs the indexing budget,
+    // not the default request budget.
+    timeoutMs: INDEXING_TIMEOUT_MS,
+  });
+}
+
+export function reviewChange(
+  changeId: string,
+  decision: "approve" | "reject",
+): Promise<ApiResult<ProposedChange>> {
+  return request<ProposedChange>(`/api/v1/changes/${changeId}/${decision}`, { method: "POST" });
 }
 
 export function getLanguages(repositoryId: string): Promise<ApiResult<LanguageCount[]>> {
