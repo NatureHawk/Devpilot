@@ -18,7 +18,8 @@ def describe_integrations(settings: Settings) -> IntegrationsResponse:
                 name="embeddings",
                 configured=settings.embeddings_configured,
                 description=(
-                    "Turns repository code into vectors so it can be searched by meaning."
+                    "Turns repository code into vectors so it can be searched by meaning. "
+                    f"Provider: {settings.embedding_provider}."
                 ),
             ),
             IntegrationStatus(

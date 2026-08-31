@@ -15,6 +15,10 @@ dependencies = [
     "httpx>=0.28",
     "cryptography>=44",
     "itsdangerous>=2.2",
+    # SQLAlchemy Vector column type for chunk_embeddings.
+    "pgvector>=0.3",
+    # Anthropic Claude — answer generation and the change-investigation agent.
+    "anthropic>=0.68",
     # Syntax-aware parsing. Each grammar is a separate package; only languages
     # with a grammar here are ever reported as parseable.
     "tree-sitter>=0.23",

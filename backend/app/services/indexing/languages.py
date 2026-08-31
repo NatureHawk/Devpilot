@@ -95,13 +95,5 @@ def detect_language(path: str) -> Language | None:
     return None
 
 
-def get_language(slug: str) -> Language | None:
-    return _BY_SLUG.get(slug)
-
-
 def parseable_slugs() -> tuple[str, ...]:
     return tuple(language.slug for language in LANGUAGES if language.parseable)
-
-
-def supported_extensions() -> tuple[str, ...]:
-    return tuple(sorted(_BY_EXTENSION))

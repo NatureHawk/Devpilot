@@ -74,9 +74,11 @@ class ChangeRequest(BaseModel):
     _validate = field_validator("request")(_reject_blank)
 
 
-class ChangeFileRead(BaseModel):
-    path: str
-    reason: str = ""
+class ExecutionEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    event: str
+    at: str
 
 
 class ChangeRead(BaseModel):
@@ -103,3 +105,12 @@ class ChangeRead(BaseModel):
     investigation: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     reviewed_at: datetime | None
+
+    # ---- execution: branch, commit, pull request ---------------------------
+    branch_name: str | None
+    commit_sha: str | None
+    pr_number: int | None
+    pr_url: str | None
+    executed_at: datetime | None
+    execution_error: str | None
+    execution_events: list[ExecutionEventRead] = Field(default_factory=list)

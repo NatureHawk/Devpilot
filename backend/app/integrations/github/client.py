@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from app.integrations.github.errors import (
+    GitHubConflictError,
     GitHubError,
     GitHubForbiddenError,
     GitHubNotFoundError,
@@ -32,6 +33,7 @@ from app.integrations.github.errors import (
     GitHubUnavailableError,
 )
 from app.integrations.github.models import (
+    GitHubPullRequest,
     GitHubRepository,
     GitHubUser,
     RepositoryTree,
@@ -156,6 +158,10 @@ class GitHubClient:
             raise GitHubForbiddenError("GitHub denied access to this resource.")
         if status == 404:
             raise GitHubNotFoundError("The requested GitHub resource does not exist.")
+        if status == 422:
+            # The Git Data API uses 422 for "ref already exists" and similar
+            # state conflicts, not for payload validation as elsewhere.
+            raise GitHubConflictError("GitHub rejected the request: the resource already exists.")
 
         logger.warning("Unexpected GitHub status %s for %s", status, path)
         raise GitHubUnavailableError(f"GitHub returned an unexpected status ({status}).")
@@ -174,26 +180,6 @@ class GitHubClient:
             email=payload.get("email"),
             avatar_url=payload.get("avatar_url"),
         )
-
-    def list_authenticated_user_repositories(self, *, limit: int = 100) -> list[GitHubRepository]:
-        """Repositories the token can see, most recently pushed first."""
-        repositories: list[GitHubRepository] = []
-        per_page = min(100, limit)
-        page = 1
-
-        while len(repositories) < limit:
-            payload = self._get_json(
-                "/user/repos",
-                params={"per_page": per_page, "page": page, "sort": "pushed"},
-            )
-            if not isinstance(payload, list) or not payload:
-                break
-            repositories.extend(_repository_from_payload(item) for item in payload)
-            if len(payload) < per_page:
-                break
-            page += 1
-
-        return repositories[:limit]
 
     # ---- repository -------------------------------------------------------
 
@@ -339,6 +325,88 @@ class GitHubClient:
                         yield sha, future.result()
                     except Exception as exc:
                         yield sha, exc
+
+    # ---- write path: branch, commit, pull request --------------------------
+    #
+    # Everything below goes through GitHub's Git Data API (blobs/trees/commits/
+    # refs) rather than a local clone and shell `git`. That means: no subprocess,
+    # no shell string ever built from repository or model content, no working
+    # directory to isolate or clean up, and no credential ever touches a
+    # filesystem or a `git remote` URL. A commit is built purely from data this
+    # process already validated, and pushing a branch is a single REST call.
+
+    def get_commit_tree_sha(self, owner: str, name: str, commit_sha: str) -> str:
+        """The tree a commit points at — the base a new tree is built from."""
+        payload = self._get_json(f"/repos/{owner}/{name}/git/commits/{commit_sha}")
+        return str(payload["tree"]["sha"])
+
+    def create_blob(self, owner: str, name: str, content: str) -> str:
+        """Store one file's content as a blob, returning its sha.
+
+        Sent as UTF-8 text rather than base64: every file DevPilot indexes and
+        patches is already decoded text, and this avoids a redundant encode.
+        """
+        payload = self._request(
+            "POST",
+            f"/repos/{owner}/{name}/git/blobs",
+            json={"content": content, "encoding": "utf-8"},
+        ).json()
+        return str(payload["sha"])
+
+    def create_tree(
+        self, owner: str, name: str, *, base_tree_sha: str, entries: list[dict[str, str]]
+    ) -> str:
+        """Build a new tree from a base plus changed-file entries only.
+
+        Unlisted paths are inherited from ``base_tree_sha`` unchanged — this is
+        what guarantees only the approved files are touched, without needing to
+        enumerate or diff the rest of the repository.
+        """
+        payload = self._request(
+            "POST",
+            f"/repos/{owner}/{name}/git/trees",
+            json={"base_tree": base_tree_sha, "tree": entries},
+        ).json()
+        return str(payload["sha"])
+
+    def create_commit(
+        self, owner: str, name: str, *, message: str, tree_sha: str, parent_sha: str
+    ) -> str:
+        payload = self._request(
+            "POST",
+            f"/repos/{owner}/{name}/git/commits",
+            json={"message": message, "tree": tree_sha, "parents": [parent_sha]},
+        ).json()
+        return str(payload["sha"])
+
+    def create_branch(self, owner: str, name: str, *, branch: str, commit_sha: str) -> None:
+        """Point a new ref at an existing commit — the equivalent of a push.
+
+        A 422 here means the ref already exists, translated by
+        :meth:`_raise_for_status` into :class:`GitHubConflictError`.
+        """
+        self._request(
+            "POST",
+            f"/repos/{owner}/{name}/git/refs",
+            json={"ref": f"refs/heads/{branch}", "sha": commit_sha},
+        )
+
+    def create_pull_request(
+        self, owner: str, name: str, *, title: str, body: str, head: str, base: str
+    ) -> GitHubPullRequest:
+        payload = self._request(
+            "POST",
+            f"/repos/{owner}/{name}/pulls",
+            json={"title": title, "body": body, "head": head, "base": base},
+        ).json()
+        return GitHubPullRequest(
+            id=int(payload["id"]),
+            number=int(payload["number"]),
+            html_url=str(payload["html_url"]),
+            state=str(payload["state"]),
+            head_ref=str(payload["head"]["ref"]),
+            base_ref=str(payload["base"]["ref"]),
+        )
 
 
 def _repository_from_payload(payload: dict[str, Any]) -> GitHubRepository:

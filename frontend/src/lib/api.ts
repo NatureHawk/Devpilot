@@ -276,13 +276,26 @@ export function searchRepository(
   });
 }
 
-export type ChangeStatus = "proposed" | "approved" | "rejected" | "stale" | "failed";
+export type ChangeStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "stale"
+  | "failed"
+  | "executing"
+  | "committed"
+  | "pr_created";
 
 export type ToolActivity = {
   tool: string;
   duration_ms: number;
   ok: boolean;
   detail: string;
+};
+
+export type ExecutionEvent = {
+  event: string;
+  at: string;
 };
 
 export type ProposedChange = {
@@ -301,6 +314,13 @@ export type ProposedChange = {
   investigation: ToolActivity[];
   created_at: string;
   reviewed_at: string | null;
+  branch_name: string | null;
+  commit_sha: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  executed_at: string | null;
+  execution_error: string | null;
+  execution_events: ExecutionEvent[];
 };
 
 export function listChanges(
@@ -329,6 +349,15 @@ export function reviewChange(
   decision: "approve" | "reject",
 ): Promise<ApiResult<ProposedChange>> {
   return request<ProposedChange>(`/api/v1/changes/${changeId}/${decision}`, { method: "POST" });
+}
+
+export function executeChange(changeId: string): Promise<ApiResult<ProposedChange>> {
+  return request<ProposedChange>(`/api/v1/changes/${changeId}/execute`, {
+    method: "POST",
+    // Several GitHub API calls in sequence (blobs, tree, commit, branch, PR);
+    // the same budget indexing uses, not the default request timeout.
+    timeoutMs: INDEXING_TIMEOUT_MS,
+  });
 }
 
 export function getLanguages(repositoryId: string): Promise<ApiResult<LanguageCount[]>> {

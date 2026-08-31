@@ -70,7 +70,7 @@ def search_repository(
 
     # The index's model wins over current configuration: those are the vectors
     # that actually exist.
-    model = repository.embedding_model or settings.embedding_model
+    model = repository.embedding_model or settings.active_embedding_model
     stored = embedding_repo.count_embeddings(session, repository.id, model=model)
     if stored == 0:
         raise RepositoryNotSearchableError(

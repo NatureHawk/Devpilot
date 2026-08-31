@@ -3,7 +3,9 @@
 # lives in Docker.
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector's own image: upstream postgres:16 with the extension already
+    # built in, so no host compiler is ever needed for vector search.
+    image: pgvector/pgvector:pg16
     container_name: devpilot-postgres
     restart: unless-stopped
     environment:

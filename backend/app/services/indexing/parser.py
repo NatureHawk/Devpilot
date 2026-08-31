@@ -43,10 +43,6 @@ class SymbolNode:
     end_line: int  # 1-based, inclusive
     parent_name: str | None = None
 
-    @property
-    def line_span(self) -> int:
-        return self.end_line - self.start_line + 1
-
 
 @dataclass(slots=True)
 class ParsedFile:

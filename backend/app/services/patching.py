@@ -72,22 +72,6 @@ class FilePatch:
     updated: str
     reasons: list[str] = field(default_factory=list)
 
-    @property
-    def added_lines(self) -> int:
-        return sum(
-            1
-            for line in _diff_lines(self.original, self.updated, self.path)
-            if line.startswith("+") and not line.startswith("+++")
-        )
-
-    @property
-    def removed_lines(self) -> int:
-        return sum(
-            1
-            for line in _diff_lines(self.original, self.updated, self.path)
-            if line.startswith("-") and not line.startswith("---")
-        )
-
 
 @dataclass(slots=True)
 class ValidatedPatch:

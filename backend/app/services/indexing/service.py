@@ -36,7 +36,7 @@ from app.integrations.github.errors import GitHubError
 from app.integrations.github.models import TreeEntry
 from app.models.repository import IndexingStatus, Repository
 from app.models.source import ChunkType, CodeChunk, SourceFile
-from app.repositories import index_repo
+from app.repositories import embedding_repo, index_repo
 from app.services.embeddings import EmbeddingNotConfiguredError, get_provider
 from app.services.indexing.chunker import ChunkingLimits, chunk_file
 from app.services.indexing.embedder import embed_repository_chunks
@@ -85,6 +85,7 @@ class IndexingReport:
     skipped_by_reason: dict[str, int] = field(default_factory=dict)
     parse_failures: int = 0
     chunks_embedded: int = 0
+    chunks_reused: int = 0
     embedding_model: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -166,13 +167,14 @@ def index_repository(
 
     logger.info(
         "Indexing completed repository_id=%s commit=%s files=%d parsed=%d chunks=%d "
-        "embedded=%d skipped=%d parse_failures=%d",
+        "embedded=%d reused=%d skipped=%d parse_failures=%d",
         repository.id,
         report.commit_sha,
         report.files_indexed,
         report.files_parsed,
         report.chunks_created,
         report.chunks_embedded,
+        report.chunks_reused,
         report.files_skipped,
         report.parse_failures,
     )
@@ -248,6 +250,18 @@ def _run(
     )
 
     # ---- persistence -----------------------------------------------------
+    # Read before the old index is deleted: `delete_repository_index` cascades
+    # to this repository's existing chunk_embeddings rows, so this is the last
+    # point at which a previous run's vectors are still there to copy forward.
+    provider = get_provider(settings)
+    reusable_embeddings = embedding_repo.fetch_reusable(
+        session,
+        repository_id=repository.id,
+        provider=getattr(provider, "provider", "") or "",
+        model=provider.model,
+        dimensions=provider.dimensions,
+    )
+
     # The old index is removed inside this transaction, so it is only really
     # gone once the replacement commits.
     index_repo.delete_repository_index(session, repository.id)
@@ -310,9 +324,11 @@ def _run(
         session,
         repository_id=repository.id,
         repository_full_name=f"{repository.owner}/{repository.name}",
-        provider=get_provider(settings),
+        provider=provider,
+        reuse=reusable_embeddings,
     )
     report.chunks_embedded = embedding_report.chunks_embedded
+    report.chunks_reused = embedding_report.chunks_reused
     report.embedding_model = embedding_report.model
 
     # ---- completion ------------------------------------------------------

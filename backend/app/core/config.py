@@ -64,25 +64,84 @@ class Settings(BaseSettings):
     github_max_concurrency: int = Field(default=8, ge=1, le=32, alias="GITHUB_MAX_CONCURRENCY")
 
     # ---- Embeddings ------------------------------------------------------
-    # Voyage AI. voyage-code-3 is trained on source code, which matters more for
-    # retrieval quality here than a general-purpose text model would.
+    # Two hosted providers sit behind the one EmbeddingProvider interface:
+    # "voyage" (Voyage AI, voyage-code-3) and "gemini" (Google Gemini API,
+    # gemini-embedding-001). Nothing above app.services.embeddings.get_provider
+    # knows which is active. Switching this requires re-indexing every
+    # repository: vectors from different models are not comparable, and the
+    # per-row `model`/`provider` metadata makes mixing them impossible rather
+    # than merely unlikely.
+    embedding_provider: Literal["voyage", "gemini"] = Field(
+        default="voyage", alias="EMBEDDING_PROVIDER"
+    )
+
+    # The stored pgvector column width. Both providers are asked to emit exactly
+    # this many dimensions, so it stays consistent across provider, model,
+    # database column, ANN index, retrieval query and validation. pgvector's
+    # HNSW index is capped at 2000 dimensions, which is the real ceiling here —
+    # not the 4096 the field once allowed. Changing it is an Alembic migration
+    # (the column type) plus a re-index, never a config-only change.
+    embedding_dimensions: int = Field(default=1024, ge=64, le=2000, alias="EMBEDDING_DIMENSIONS")
+    embedding_timeout_seconds: float = Field(default=60.0, alias="EMBEDDING_TIMEOUT_SECONDS")
+    # Wall-clock ceiling on retrying one batch against a rate limit. A free-tier
+    # key's window can be on the order of a minute, so this needs real headroom —
+    # but it is still a ceiling: indexing must eventually fail loudly rather than
+    # retry forever. Shared by both providers.
+    embedding_max_retry_seconds: float = Field(
+        default=120.0, ge=1.0, alias="EMBEDDING_MAX_RETRY_SECONDS"
+    )
+
+    # ---- Voyage AI ------------------------------------------------------
+    # voyage-code-3 is trained on source code, which matters more for retrieval
+    # quality here than a general-purpose text model would. It can emit
+    # 256/512/1024/2048; keep EMBEDDING_DIMENSIONS to one of those when this
+    # provider is active.
     voyage_api_key: str = Field(default="", alias="VOYAGE_API_KEY")
     embedding_model: str = Field(default="voyage-code-3", alias="EMBEDDING_MODEL")
-    # voyage-code-3 can emit 256/512/1024/2048; 1024 is its default and the
-    # balance we index at. The value is fixed per index: vectors of different
-    # widths are not comparable, so changing it requires a re-index.
-    embedding_dimensions: int = Field(default=1024, ge=64, le=4096, alias="EMBEDDING_DIMENSIONS")
     # Voyage accepts up to 128 inputs per request; staying under it leaves room
     # for the payload-size guard to trigger first on large chunks.
     embedding_batch_size: int = Field(default=64, ge=1, le=128, alias="EMBEDDING_BATCH_SIZE")
-    embedding_timeout_seconds: float = Field(default=60.0, alias="EMBEDDING_TIMEOUT_SECONDS")
     embedding_api_url: str = Field(
         default="https://api.voyageai.com/v1/embeddings", alias="EMBEDDING_API_URL"
+    )
+
+    # ---- Google Gemini embeddings ------------------------------------------
+    # gemini-embedding-001 over the Gemini API (generativelanguage.googleapis.com).
+    # Talked to as plain HTTPS, like every other integration here — no vendor SDK.
+    # The model's native default width is 3072; it is a Matryoshka (MRL) model,
+    # so `outputDimensionality` returns a genuine lower-width embedding rather
+    # than a truncation. We request EMBEDDING_DIMENSIONS (1024 by default, an
+    # officially supported flexible value) so the existing vector(1024) schema,
+    # HNSW index and retrieval query are untouched. The Google-recommended MRL
+    # widths are 768 / 1536 / 3072; 1536 needs the optional dimension migration,
+    # 3072 cannot be HNSW-indexed by pgvector at all.
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_embedding_model: str = Field(
+        default="gemini-embedding-001", alias="GEMINI_EMBEDDING_MODEL"
+    )
+    # Base URL; the client appends `/models/<model>:embedContent` and
+    # `:batchEmbedContents`.
+    gemini_api_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta", alias="GEMINI_API_URL"
+    )
+    # `batchEmbedContents` (the synchronous batch call, not the async Batch API)
+    # has no documented hard cap; 100 is a conservative, well-tested size.
+    gemini_embedding_batch_size: int = Field(
+        default=100, ge=1, le=250, alias="GEMINI_EMBEDDING_BATCH_SIZE"
     )
 
     # ---- Language model --------------------------------------------------
     # Answer generation and code-change investigation. Separate from the
     # embedding provider: they are different models with different failure modes.
+    #
+    # Which vendor is behind `LLMProvider` — "anthropic" (pay-per-token) or
+    # "openrouter" (routes to a configurable model; used here with a free one
+    # for routine development, so this has no ongoing API cost). Switching this
+    # touches no caller: both sides of get_provider() implement the same
+    # Protocol, and nothing above the provider layer knows which is in use.
+    llm_provider: Literal["anthropic", "openrouter"] = Field(
+        default="anthropic", alias="LLM_PROVIDER"
+    )
     llm_model: str = Field(default="claude-opus-5", alias="LLM_MODEL")
     # Streaming is always used, so this can be generous without risking an HTTP
     # timeout; it bounds a runaway answer rather than shaping a normal one.
@@ -93,6 +152,22 @@ class Settings(BaseSettings):
     # Thinking depth. "high" is the default for intelligence-sensitive work;
     # investigation runs benefit from more, plain Q&A rarely needs it.
     llm_effort: str = Field(default="high", alias="LLM_EFFORT")
+
+    # OpenRouter: one OpenAI-compatible endpoint in front of many models, so the
+    # model actually used is a config value rather than a vendor SDK choice.
+    # The free model below is verified (2026-08-28) two ways: its catalogue
+    # entry at OpenRouter's own /api/v1/models lists tools/streaming/a 1M-token
+    # context, and a real request against it — plain completion, streaming,
+    # and an actual tool call — was run and returned correctly. (A different
+    # free model, z-ai/glm-5.2:free, checked out identically on paper but was
+    # returning 429s from an overloaded shared pool at verification time —
+    # this one is the model that was actually confirmed working, not just
+    # theoretically capable.)
+    openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
+    openrouter_model: str = Field(default="minimax/minimax-m3:free", alias="OPENROUTER_MODEL")
+    openrouter_api_url: str = Field(
+        default="https://openrouter.ai/api/v1/chat/completions", alias="OPENROUTER_API_URL"
+    )
 
     # ---- Context budget --------------------------------------------------
     # Ceiling on retrieved source sent to the model, in characters. Chosen as a
@@ -161,15 +236,19 @@ class Settings(BaseSettings):
 
     @property
     def ai_provider_configured(self) -> bool:
-        return bool(self.anthropic_api_key)
+        return self.llm_configured
 
     @property
     def llm_configured(self) -> bool:
         """Whether answer generation is possible in this deployment.
 
         Checked before any retrieval work so an unconfigured deployment reports
-        a configuration state instead of doing work it cannot finish.
+        a configuration state instead of doing work it cannot finish. Depends
+        on which provider is selected — the other one's key being present (or
+        absent) is irrelevant.
         """
+        if self.llm_provider == "openrouter":
+            return bool(self.openrouter_api_key)
         return bool(self.anthropic_api_key)
 
     @property
@@ -177,9 +256,23 @@ class Settings(BaseSettings):
         """Whether this deployment can generate embeddings at all.
 
         Checked before indexing and before search so the API can answer with a
-        configuration error rather than a provider exception.
+        configuration error rather than a provider exception. Depends on which
+        provider is selected — the other one's key is irrelevant.
         """
+        if self.embedding_provider == "gemini":
+            return bool(self.gemini_api_key)
         return bool(self.voyage_api_key)
+
+    @property
+    def active_embedding_model(self) -> str:
+        """The model name of the configured embedding provider.
+
+        Used as the fallback when a repository row has no recorded model yet;
+        a repository that has been indexed always carries its own.
+        """
+        if self.embedding_provider == "gemini":
+            return self.gemini_embedding_model
+        return self.embedding_model
 
 
 @lru_cache(maxsize=1)

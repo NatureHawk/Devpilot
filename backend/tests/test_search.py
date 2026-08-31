@@ -202,6 +202,14 @@ class TestSearchEndpoint:
     def test_unconfigured_provider_reports_configuration_not_a_crash(
         self, client: TestClient, signed_in: User, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Patched explicitly rather than relying on VOYAGE_API_KEY being unset
+        # in the ambient environment — a real key may legitimately be present
+        # (e.g. during live verification), and this test is about the
+        # unconfigured *path*, not about what happens to be in .env.
+        from app.core.config import Settings
+
+        monkeypatch.setattr(Settings, "embeddings_configured", property(lambda self: False))
+
         repository = _repository(signed_in, embedding_model="voyage-code-3")
         monkeypatch.setattr(
             repositories_route.repository_repo, "get_by_id", lambda *a, **k: repository

@@ -48,6 +48,38 @@ def delete_repository_embeddings(session: Session, repository_id: uuid.UUID) -> 
     return result.rowcount or 0
 
 
+def fetch_reusable(
+    session: Session,
+    *,
+    repository_id: uuid.UUID,
+    provider: str,
+    model: str,
+    dimensions: int,
+) -> dict[str, list[float]]:
+    """Existing vectors for this repository, keyed by content hash.
+
+    Called before the old index is deleted (the delete cascades to this same
+    table), so a re-index can copy a chunk's vector forward instead of asking
+    the provider for it again. Scoped to the exact ``provider``, ``model`` and
+    ``dimensions`` as well as ``repository_id``: a vector produced by a
+    different provider, model or width is never a valid substitute, so it is
+    simply absent from the map rather than filtered out downstream. This is
+    what makes a provider or model switch a full re-embed.
+    """
+    stmt = select(ChunkEmbedding.content_hash, ChunkEmbedding.embedding).where(
+        ChunkEmbedding.repository_id == repository_id,
+        ChunkEmbedding.provider == provider,
+        ChunkEmbedding.model == model,
+        ChunkEmbedding.dimensions == dimensions,
+        ChunkEmbedding.content_hash.is_not(None),
+    )
+    return {
+        content_hash: list(vector)
+        for content_hash, vector in session.execute(stmt)
+        if content_hash is not None
+    }
+
+
 def count_embeddings(
     session: Session, repository_id: uuid.UUID, *, model: str | None = None
 ) -> int:

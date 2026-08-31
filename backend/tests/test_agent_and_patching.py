@@ -233,6 +233,9 @@ class TestChangeStatusModel:
             "rejected",
             "stale",
             "failed",
+            "executing",
+            "committed",
+            "pr_created",
         }
 
 

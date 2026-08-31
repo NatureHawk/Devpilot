@@ -147,7 +147,7 @@ def investigate(
         )
 
         if not completion.wants_tools:
-            proposal = _parse_proposal(completion.text)
+            summary, edits, files_to_change = _parse_proposal(completion.text)
             logger.info(
                 "Investigation complete repository_id=%s steps=%d tool_calls=%d "
                 "files_read=%d edits=%d duration_ms=%d",
@@ -155,13 +155,13 @@ def investigate(
                 steps,
                 tool_calls_used,
                 len(context.files_read),
-                len(proposal[1]),
+                len(edits),
                 int((time.monotonic() - started) * 1000),
             )
             return InvestigationResult(
-                summary=proposal[0],
-                edits=proposal[1],
-                files_to_change=proposal[2],
+                summary=summary,
+                edits=edits,
+                files_to_change=files_to_change,
                 activity=context.activity,
                 files_read=dict(context.files_read),
                 tool_calls_used=tool_calls_used,

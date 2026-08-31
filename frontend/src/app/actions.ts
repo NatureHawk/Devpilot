@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache";
 import {
   connectRepository,
   createChange,
+  executeChange,
   getAuthorizeUrl,
   reviewChange,
   runIndex,
@@ -175,5 +176,18 @@ export async function reviewChangeAction(
   if (!result.ok) return failure(result.error);
 
   revalidatePath(repositoryPath(owner, name, "changes"));
+  return { ok: true, data: result.data };
+}
+
+export async function executeChangeAction(
+  changeId: string,
+  owner: string,
+  name: string,
+): Promise<ActionResult<ProposedChange>> {
+  const result = await executeChange(changeId);
+  if (!result.ok) return failure(result.error);
+
+  revalidatePath(repositoryPath(owner, name, "changes"));
+  revalidatePath(repositoryPath(owner, name, "pull-requests"));
   return { ok: true, data: result.data };
 }

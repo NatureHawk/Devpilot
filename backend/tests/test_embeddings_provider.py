@@ -14,6 +14,7 @@ import pytest
 
 from app.integrations.voyage import VoyageEmbeddingProvider
 from app.services.embeddings.provider import (
+    EmbeddingError,
     EmbeddingRateLimitError,
     EmbeddingResponseError,
     EmbeddingUnauthorizedError,
@@ -39,13 +40,17 @@ def _ok(request: httpx.Request, *, shuffle: bool = False) -> httpx.Response:
 
 
 def _provider(
-    handler: Callable[[httpx.Request], httpx.Response], *, batch_size: int = 64
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    batch_size: int = 64,
+    max_retry_seconds: float = 5.0,
 ) -> VoyageEmbeddingProvider:
     return VoyageEmbeddingProvider(
         api_key="test-key",
         model="voyage-code-3",
         dimensions=DIMENSIONS,
         batch_size=batch_size,
+        max_retry_seconds=max_retry_seconds,
         transport=httpx.MockTransport(handler),
     )
 
@@ -153,7 +158,7 @@ class TestFailures:
 
     def test_rate_limit_surfaces_as_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("app.integrations.voyage.client.time.sleep", lambda _: None)
-        provider = _provider(lambda _: httpx.Response(429))
+        provider = _provider(lambda _: httpx.Response(429), max_retry_seconds=0.05)
 
         with pytest.raises(EmbeddingRateLimitError) as exc:
             provider.embed_text("a", kind=InputKind.QUERY)
@@ -198,3 +203,99 @@ class TestFailures:
         with pytest.raises(EmbeddingResponseError) as exc:
             provider.embed_text("a", kind=InputKind.QUERY)
         assert exc.value.details == {"expected": DIMENSIONS, "received": 2}
+
+
+class TestRetryBehaviour:
+    """The actual fix: a real rate-limit window is on the order of a minute,
+    not a couple of seconds, and the provider's own `Retry-After` is a direct
+    instruction that must win over guessing via backoff."""
+
+    def test_succeeds_after_the_rate_limit_clears(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("app.integrations.voyage.client.time.sleep", lambda _: None)
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return httpx.Response(429)
+            return _ok(request)
+
+        result = _provider(handler).embed_texts(["a"], kind=InputKind.DOCUMENT)
+
+        assert attempts["count"] == 2
+        assert len(result.vectors) == 1
+
+    def test_retry_after_header_is_used_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr("app.integrations.voyage.client.time.sleep", sleeps.append)
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return httpx.Response(429, headers={"Retry-After": "7"})
+            return _ok(request)
+
+        # A generous budget: the point is that 7 is used as given, not clamped
+        # by an unrelated, much smaller time budget.
+        _provider(handler, max_retry_seconds=30.0).embed_texts(["a"], kind=InputKind.DOCUMENT)
+
+        assert sleeps == [7.0]
+
+    def test_backoff_without_retry_after_grows_and_is_jittered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr("app.integrations.voyage.client.time.sleep", sleeps.append)
+        # No jitter, so the doubling pattern is checkable exactly.
+        monkeypatch.setattr("app.integrations.voyage.client.random.uniform", lambda a, b: 0.0)
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["count"] += 1
+            if attempts["count"] <= 3:
+                return httpx.Response(503)
+            return _ok(request)
+
+        _provider(handler).embed_texts(["a"], kind=InputKind.DOCUMENT)
+
+        assert sleeps == [1.0, 2.0, 4.0]
+
+    def test_jitter_keeps_delay_within_a_bounded_range_of_the_base(self) -> None:
+        """Direct unit test of the formula: many samples, no request loop or
+        time budget involved, so it can't be confused with the exhaustion
+        behaviour those concerns actually govern."""
+        delays = [VoyageEmbeddingProvider._retry_delay(1, None) for _ in range(200)]
+
+        # Base for attempt 1 is 1.0s, jittered by +/- 25%.
+        assert all(0.75 <= delay <= 1.25 for delay in delays)
+        # Actual jitter, not a constant — otherwise many concurrent retries
+        # would all wake on the same tick.
+        assert len(set(delays)) > 1
+
+    def test_gives_up_after_the_time_budget_elapses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ceiling is wall-clock time, not an attempt count — this must
+        terminate even though the provider never stops answering 429."""
+        monkeypatch.setattr("app.integrations.voyage.client.time.sleep", lambda _: None)
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["count"] += 1
+            return httpx.Response(429)
+
+        provider = _provider(handler, max_retry_seconds=0.05)
+
+        with pytest.raises(EmbeddingRateLimitError):
+            provider.embed_text("a", kind=InputKind.QUERY)
+        assert attempts["count"] > 1
+
+    def test_transient_errors_still_raise_their_own_typed_error_on_exhaustion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("app.integrations.voyage.client.time.sleep", lambda _: None)
+        provider = _provider(lambda _: httpx.Response(502), max_retry_seconds=0.05)
+
+        with pytest.raises(EmbeddingError):
+            provider.embed_text("a", kind=InputKind.QUERY)

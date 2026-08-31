@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.conversation import Conversation, Message, MessageSource
+from app.models.conversation import Conversation, Message
 
 
 def get_conversation(
@@ -67,14 +67,5 @@ def list_conversations(
         .where(Conversation.repository_id == repository_id)
         .order_by(Conversation.created_at.desc())
         .limit(limit)
-    )
-    return list(session.scalars(stmt))
-
-
-def sources_for_message(session: Session, message_id: uuid.UUID) -> list[MessageSource]:
-    stmt = (
-        select(MessageSource)
-        .where(MessageSource.message_id == message_id)
-        .order_by(MessageSource.rank)
     )
     return list(session.scalars(stmt))

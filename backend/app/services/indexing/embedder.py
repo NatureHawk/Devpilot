@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.models.embedding import ChunkEmbedding
 from app.models.source import CodeChunk, SourceFile
 from app.repositories import embedding_repo
-from app.services.embeddings import InputKind, build_embedding_text
+from app.services.embeddings import InputKind, build_embedding_text, content_hash
 from app.services.embeddings.provider import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,11 @@ _PAGE_SIZE = 200
 @dataclass(slots=True)
 class EmbeddingReport:
     chunks_embedded: int = 0
+    # Chunks whose vector was copied forward from a previous index rather than
+    # requested from the provider — the actual saving this exists to produce.
+    chunks_reused: int = 0
     batches: int = 0
+    provider: str = ""
     model: str = ""
     dimensions: int = 0
 
@@ -55,17 +59,31 @@ def embed_repository_chunks(
     repository_id: uuid.UUID,
     repository_full_name: str,
     provider: EmbeddingProvider,
+    reuse: dict[str, list[float]] | None = None,
 ) -> EmbeddingReport:
-    """Embed every chunk of a repository and store the vectors.
+    """Embed a repository's chunks, reusing vectors for anything unchanged.
+
+    ``reuse`` maps content hash -> vector, from the index this one is
+    replacing. It must be gathered by the caller *before* the old index (and
+    therefore the old embedding rows) is deleted — this function no longer has
+    anything to read it from by the time it runs. A chunk whose exact embedded
+    text (path, language, symbol, content) matches a hash in ``reuse`` costs a
+    row copy instead of a provider request; every other chunk is batched and
+    sent for a real embedding, exactly as before.
 
     Any provider failure propagates: the caller treats the whole indexing run as
     failed rather than leaving a repository with vectors for some chunks and not
     others, which would silently return partial search results.
     """
-    report = EmbeddingReport(model=provider.model, dimensions=provider.dimensions)
+    reuse = reuse or {}
+    provider_name = getattr(provider, "provider", "") or ""
+    report = EmbeddingReport(
+        provider=provider_name, model=provider.model, dimensions=provider.dimensions
+    )
 
-    # Vectors from a previous run are replaced wholesale, so a re-index can
-    # never blend old and new embeddings.
+    # Vectors from a previous run are replaced wholesale — new chunk ids need
+    # their own rows regardless of whether the vector is reused or fresh — so
+    # a re-index can never blend rows belonging to two different chunk sets.
     removed = embedding_repo.delete_repository_embeddings(session, repository_id)
     if removed:
         logger.info(
@@ -74,36 +92,74 @@ def embed_repository_chunks(
         )
 
     for page in _iter_chunk_pages(session, repository_id):
-        texts = [
-            build_embedding_text(
-                repository_full_name=repository_full_name,
-                file_path=row.path,
-                language=row.language,
-                chunk_type=row.chunk_type,
-                symbol=row.symbol,
-                parent_symbol=row.parent_symbol,
-                content=row.content,
+        hashes = [
+            content_hash(
+                build_embedding_text(
+                    repository_full_name=repository_full_name,
+                    file_path=row.path,
+                    language=row.language,
+                    chunk_type=row.chunk_type,
+                    symbol=row.symbol,
+                    parent_symbol=row.parent_symbol,
+                    content=row.content,
+                )
             )
             for row in page
         ]
 
-        result = provider.embed_texts(texts, kind=InputKind.DOCUMENT)
-        report.batches += 1
+        to_fetch: list[tuple[_ChunkRow, str]] = []
+        rows_to_save: list[ChunkEmbedding] = []
 
-        # Position is the contract: provider implementations must preserve
-        # input order, which is what makes this zip correct.
-        session.bulk_save_objects(
-            [
+        for row, digest in zip(page, hashes, strict=True):
+            cached = reuse.get(digest)
+            if cached is not None:
+                rows_to_save.append(
+                    ChunkEmbedding(
+                        chunk_id=row.id,
+                        repository_id=repository_id,
+                        provider=provider_name,
+                        model=provider.model,
+                        dimensions=provider.dimensions,
+                        embedding=cached,
+                        content_hash=digest,
+                    )
+                )
+                report.chunks_reused += 1
+            else:
+                to_fetch.append((row, digest))
+
+        if to_fetch:
+            texts = [
+                build_embedding_text(
+                    repository_full_name=repository_full_name,
+                    file_path=row.path,
+                    language=row.language,
+                    chunk_type=row.chunk_type,
+                    symbol=row.symbol,
+                    parent_symbol=row.parent_symbol,
+                    content=row.content,
+                )
+                for row, _ in to_fetch
+            ]
+            result = provider.embed_texts(texts, kind=InputKind.DOCUMENT)
+            report.batches += 1
+
+            # Position is the contract: provider implementations must preserve
+            # input order, which is what makes this zip correct.
+            rows_to_save.extend(
                 ChunkEmbedding(
                     chunk_id=row.id,
                     repository_id=repository_id,
+                    provider=result.provider or provider_name,
                     model=result.model,
                     dimensions=result.dimensions,
                     embedding=vector,
+                    content_hash=digest,
                 )
-                for row, vector in zip(page, result.vectors, strict=True)
-            ]
-        )
+                for (row, digest), vector in zip(to_fetch, result.vectors, strict=True)
+            )
+
+        session.bulk_save_objects(rows_to_save)
         session.flush()
         report.chunks_embedded += len(page)
 
@@ -112,6 +168,7 @@ def embed_repository_chunks(
         extra={
             "repository_id": str(repository_id),
             "chunks_embedded": report.chunks_embedded,
+            "chunks_reused": report.chunks_reused,
             "model": report.model,
         },
     )

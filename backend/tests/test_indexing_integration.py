@@ -3,6 +3,11 @@
 These need a real PostgreSQL instance because they assert on constraints,
 cascades and transaction behaviour that no in-memory substitute reproduces.
 They skip when ``DATABASE_URL`` is unreachable.
+
+Embedding generation is stubbed with a deterministic fake provider: these
+tests prove real Postgres/pgvector persistence, not Voyage's API. Whether
+Voyage itself returns usable vectors is a separate, provider-integration
+concern, exercised only when VOYAGE_API_KEY names a real key.
 """
 
 from __future__ import annotations
@@ -20,16 +25,48 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+import app.services.indexing.service as indexing_service
 from app.api.deps import get_github_client
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.security import issue_session
 from app.db.session import get_engine, get_session_factory
 from app.integrations.github.client import GitHubClient
 from app.models.repository import IndexingStatus, Repository, RepositoryVisibility
 from app.models.source import CodeChunk, SourceFile
 from app.models.user import User
+from app.services.embeddings.provider import EmbeddingResult
 
 pytestmark = pytest.mark.integration
+
+
+class _FakeEmbeddingProvider:
+    """Deterministic stand-in for VoyageEmbeddingProvider. No network call."""
+
+    def __init__(self, dimensions: int) -> None:
+        self.model = "fake-test-embedder"
+        self.dimensions = dimensions
+
+    def embed_texts(self, texts: object, *, kind: object) -> EmbeddingResult:
+        texts = list(texts)  # type: ignore[arg-type]
+        vectors = [
+            [((i * 31 + j) % 97) / 97 for j in range(self.dimensions)]
+            for i in range(len(texts))
+        ]
+        return EmbeddingResult(vectors=vectors, model=self.model, dimensions=self.dimensions)
+
+
+@pytest.fixture(autouse=True)
+def fake_embedding_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scoped to `monkeypatch` (undone after each test) rather than the real
+    environment, so this module's stand-in provider can never leak into
+    another module's test of the *unconfigured* path."""
+    dimensions = get_settings().embedding_dimensions
+    monkeypatch.setattr(Settings, "embeddings_configured", property(lambda self: True))
+    monkeypatch.setattr(
+        indexing_service,
+        "get_provider",
+        lambda settings: _FakeEmbeddingProvider(dimensions),
+    )
 
 
 def database_available() -> bool:

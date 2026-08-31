@@ -47,6 +47,13 @@ class GitHubNotFoundError(GitHubError):
     code = "github_not_found"
 
 
+class GitHubConflictError(GitHubError):
+    """The requested ref, branch, or resource already exists."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "github_conflict"
+
+
 class GitHubUnavailableError(GitHubError):
     """GitHub could not be reached, or returned a server error."""
 

@@ -356,13 +356,59 @@ its investigation.
 
 **Stale snapshots.** A proposal records the commit its patch was built against. If the
 repository is re-indexed while it waits, it is marked `stale` and cannot be approved.
-The check runs when a proposal is read and again at approval, because the repository can
-move at any point in between.
+The check runs when a proposal is read, again at approval, and a third time immediately
+before execution — the repository can move at any of those points.
 
-**Why Git writes are excluded here.** Approval is an application state. DevPilot creates
-no branches, commits or pull requests in this milestone. Getting the review surface right
-is the whole point of the step, and shipping the write path at the same time would mean
-trusting a review workflow nobody had used yet.
+<br>
+
+## From approved diff to pull request
+
+Approval and execution are separate, explicit acts. Approving a change never touches
+GitHub; a second, distinct action — **Create pull request** — does, and only that
+action does.
+
+```mermaid
+flowchart LR
+    A["approved"] --> E["executing"]
+    E --> V["snapshot re-checked<br/>patch re-validated<br/>secret-scanned"]
+    V --> C["commit + branch<br/>(committed)"]
+    C --> PR["pull request<br/>(pr_created)"]
+```
+
+**No local git, no subprocess, no shell.** Everything above goes through GitHub's Git
+Data API — blobs, trees, commits, refs — rather than a clone and shell commands. That
+means there is no working directory to isolate or clean up, no credential that ever
+touches a filesystem or a `git remote` URL, and no string built for a shell to
+interpret. A blob is created from validated file content, a tree is built from the
+*base* tree plus only the changed paths (everything else is inherited untouched, which
+is what guarantees no unrelated file is ever touched), a commit points at that tree, and
+a branch ref points at that commit. Opening the PR is one more REST call.
+
+**The patch is applied exactly as approved.** The model is not consulted again during
+execution — nothing here can regenerate or reinterpret the diff a human already
+reviewed. The same content-anchored validation from proposal time runs again against
+the live indexed source before anything is written.
+
+**A lightweight secret scan runs before every commit.** Common credential shapes —
+private key headers, GitHub/AWS/Google/Slack token prefixes, a bare `.env` file — block
+the commit if the *new* content introduces one. This is explicitly not a complete
+secret scanner; it catches the common accidents, and only ever reports what kind of
+thing matched and where, never the matched text.
+
+**Idempotent and concurrency-safe by construction.** Clicking "Create pull request"
+twice — or two people clicking it at once — cannot create two PRs. A single
+`SELECT ... FOR UPDATE` claims the proposal before any GitHub call is made; a second
+request blocks on that row lock and then sees the claim has already happened. Re-running
+execution on a proposal that already reached `pr_created` is a no-op that returns the
+existing PR; re-running it on one still `committed` (a prior PR-creation attempt failed)
+retries only that last step, against the branch and commit that already exist — the
+commit is never redone or duplicated.
+
+**Failure is never silent.** If a commit succeeds but PR creation fails, the branch and
+commit are kept and the proposal stays `committed`, retryable — it is not blamed for a
+failure that happened after it. If nothing has been written to GitHub yet, the proposal
+is marked `failed` with a safe message. Nothing is ever reported as done until GitHub
+has actually confirmed it.
 
 <br>
 
@@ -379,6 +425,9 @@ text in a file that DevPilot will later read.
 | **Authorization** | A repository connected by someone else reads as missing, not forbidden, so an id is never confirmed to exist. |
 | **Secrets** | Credentials live in the backend environment and are read there. Tokens are encrypted at rest with a key derived from `SECRET_KEY`. Provider error bodies are logged, never returned — they can echo request content, which here includes source. |
 | **Output rendering** | Answers, diffs and excerpts are rendered as text. Nothing from a repository is ever interpreted as markup. |
+| **No Git writes before approval** | Nothing reaches GitHub until a human clicks approve, and then again, execute. The backend re-derives approval state from the database on every request — a client can never assert `approved=true`. |
+| **No shell, ever** | Branch, commit and PR creation go through GitHub's Git Data API, not a local clone and shell `git`. There is no code path anywhere that builds a shell command from repository content, a model output, or a branch name. |
+| **Commit-blocking secret scan** | New content in an approved patch is checked against common credential patterns before it is ever committed. A match blocks the commit; the matched text is never logged or shown. |
 
 <br>
 
@@ -394,7 +443,7 @@ text in a file that DevPilot will later read.
 | `code_chunks` | Structural chunks with symbol, parent symbol, line and byte ranges. |
 | `chunk_embeddings` | One pgvector embedding per chunk per model, with its dimensions. |
 | `message_sources` | Citations: which chunk an answer drew on, with its location copied so it survives a re-index. |
-| `proposed_changes` | Change requests, their investigation, validated edits, diff and review status. |
+| `proposed_changes` | Change requests, their investigation, validated edits, diff, review status, and — once approved — the branch, commit and pull request DevPilot created. |
 | `conversations` / `messages` | Question threads scoped to a repository. |
 
 Design decisions worth naming:
@@ -430,6 +479,7 @@ isn't — deleting a user doesn't delete the repositories they connected.
 | `GET /api/v1/repositories/{id}/conversations` | Conversation history. |
 | `POST /api/v1/repositories/{id}/changes` | Investigate a request and propose a patch. |
 | `POST /api/v1/changes/{id}/approve` · `/reject` | Record a human decision. |
+| `POST /api/v1/changes/{id}/execute` | Create a branch, commit, and pull request for an approved change. Idempotent. |
 
 Every failure returns the same envelope, so clients branch on a code rather than parsing prose:
 
@@ -475,6 +525,20 @@ database that becomes a cross-system join.
 
 **No AI frameworks.** No LangChain, no agent framework, no vector-database SDK. Direct calls and
 small owned abstractions, so every layer stays inspectable.
+
+<br>
+
+## Limitations
+
+- **Automated tests are not run against a proposed change.** No execution sandbox exists
+  in this deployment, so the UI says "patch validated," never "tests passed."
+- **Merging a pull request is not automatic.** DevPilot opens it; a human merges it on
+  GitHub, on their own schedule, under their own branch protection rules.
+- **Nothing deploys automatically.** Opening a PR is the full extent of what an approved
+  change does.
+- **The secret scan is a pattern check, not a security boundary.** It catches common,
+  recognisable credential shapes — it is not a substitute for a real secret-scanning
+  service on the repository itself.
 
 <br>
 

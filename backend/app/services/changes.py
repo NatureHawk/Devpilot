@@ -11,7 +11,6 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import status
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -29,11 +28,6 @@ from app.services.patching import (
 from app.services.tools import summarise_activity
 
 logger = logging.getLogger(__name__)
-
-
-class ChangeGenerationError(AppError):
-    status_code = status.HTTP_502_BAD_GATEWAY
-    code = "change_generation_failed"
 
 
 def propose_change(

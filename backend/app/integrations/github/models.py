@@ -72,3 +72,15 @@ class RepositoryTree:
     @property
     def blobs(self) -> list[TreeEntry]:
         return [entry for entry in self.entries if entry.is_blob]
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubPullRequest:
+    """The fields DevPilot persists after opening a pull request."""
+
+    id: int
+    number: int
+    html_url: str
+    state: str
+    head_ref: str
+    base_ref: str

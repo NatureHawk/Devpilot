@@ -34,14 +34,17 @@ class InputKind(StrEnum):
 class EmbeddingResult:
     """Vectors plus the identity of what produced them.
 
-    Model and dimensions travel with the vectors so callers can persist them
-    alongside, and so mixing incompatible vectors is detectable rather than a
-    silent correctness bug.
+    Provider, model and dimensions travel with the vectors so callers can
+    persist them alongside, and so mixing incompatible vectors is detectable
+    rather than a silent correctness bug.
     """
 
     vectors: list[list[float]]
     model: str
     dimensions: int
+    # "voyage" | "gemini". Stored per row so a switch of provider — even to a
+    # model that somehow shared a name — can never blend two vector spaces.
+    provider: str = ""
 
 
 class EmbeddingError(AppError):
@@ -90,6 +93,9 @@ class EmbeddingProvider(Protocol):
     That guarantee is what lets the indexer map results back to chunks by
     position rather than by echoing identifiers through the provider.
     """
+
+    @property
+    def provider(self) -> str: ...
 
     @property
     def model(self) -> str: ...

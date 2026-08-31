@@ -108,7 +108,7 @@ def retrieve(
             details={"indexing_status": str(repository.indexing_status)},
         )
 
-    model = repository.embedding_model or settings.embedding_model
+    model = repository.embedding_model or settings.active_embedding_model
     searched = embedding_repo.count_embeddings(session, repository.id, model=model)
     if searched == 0:
         raise RepositoryNotSearchableError(

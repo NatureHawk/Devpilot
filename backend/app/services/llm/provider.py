@@ -155,6 +155,19 @@ class LLMRefusalError(LLMError):
     code = "llm_refused"
 
 
+class LLMCapabilityError(LLMError):
+    """The configured model cannot do something this deployment needs of it.
+
+    Distinct from :class:`LLMNotConfiguredError` (no credentials at all): this
+    is a model that DevPilot can reach, but that does not support a capability
+    a request actually needs — tool calling, so far. Raised before a request
+    is sent, not after a confusing provider error comes back.
+    """
+
+    status_code = status.HTTP_501_NOT_IMPLEMENTED
+    code = "llm_capability_unsupported"
+
+
 @runtime_checkable
 class LLMProvider(Protocol):
     """Generates text, optionally using tools."""

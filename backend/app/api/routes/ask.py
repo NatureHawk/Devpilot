@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from fastapi import APIRouter, status
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import AppSettings, CurrentUser, DbSession
+from app.api.deps import AppSettings, CurrentUser, DbSession, GitHub
 from app.core.errors import AppError, ErrorResponse, NotFoundError
 from app.models.change import ChangeStatus
 from app.models.repository import Repository
@@ -30,6 +30,7 @@ from app.schemas.ask import (
 from app.schemas.common import ListResponse
 from app.services import ask as ask_service
 from app.services import changes as change_service
+from app.services.execution import execute_change
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,38 @@ def approve_change(session: DbSession, user: CurrentUser, change_id: uuid.UUID) 
 )
 def reject_change(session: DbSession, user: CurrentUser, change_id: uuid.UUID) -> ChangeRead:
     return _review(session, user, change_id, approve=False)
+
+
+@router.post(
+    "/changes/{change_id}/execute",
+    response_model=ChangeRead,
+    summary="Create a branch, commit, and pull request for an approved change",
+    responses={
+        404: {"model": ErrorResponse, "description": "Change does not exist"},
+        409: {
+            "model": ErrorResponse,
+            "description": "Not approved, already executing, or the snapshot is stale",
+        },
+    },
+)
+def execute_change_route(
+    session: DbSession, user: CurrentUser, client: GitHub, change_id: uuid.UUID
+) -> ChangeRead:
+    """Apply the exact approved patch and open a real GitHub pull request.
+
+    Idempotent: re-calling this on an already-``pr_created`` change returns the
+    existing PR rather than creating a second one, and re-calling it on a
+    ``committed`` change (a prior PR-creation attempt failed) retries only
+    that step. Nothing here regenerates the patch — the model is not
+    consulted again; this applies exactly what was reviewed and approved.
+    """
+    proposal = change_repo.get_by_id(session, change_id)
+    if proposal is None:
+        raise NotFoundError("That change does not exist.")
+
+    repository = _require_repository(session, proposal.repository_id, user)
+    result = execute_change(session, proposal=proposal, repository=repository, client=client)
+    return ChangeRead.model_validate(result)
 
 
 def _review(session: DbSession, user: User, change_id: uuid.UUID, *, approve: bool) -> ChangeRead:
