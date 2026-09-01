@@ -65,6 +65,18 @@ def get_provider(settings: "Settings") -> LLMProvider:
     if not settings.llm_configured:
         raise LLMNotConfiguredError("No language model is configured for this deployment.")
 
+    if settings.llm_provider == "gemini":
+        from app.integrations.gemini_llm import GeminiLLMProvider
+
+        return GeminiLLMProvider(
+            api_key=settings.gemini_llm_key,
+            model=settings.gemini_llm_model,
+            api_url=settings.gemini_llm_api_url,
+            max_output_tokens=settings.llm_max_output_tokens,
+            timeout_seconds=settings.llm_timeout_seconds,
+            max_retry_seconds=settings.gemini_llm_max_retry_seconds,
+        )
+
     if settings.llm_provider == "openrouter":
         from app.integrations.openrouter_llm import OpenRouterLLMProvider
 
@@ -75,6 +87,19 @@ def get_provider(settings: "Settings") -> LLMProvider:
             max_output_tokens=settings.llm_max_output_tokens,
             effort=settings.llm_effort,
             timeout_seconds=settings.llm_timeout_seconds,
+        )
+
+    if settings.llm_provider == "groq":
+        from app.integrations.groq_llm import GroqLLMProvider
+
+        return GroqLLMProvider(
+            api_key=settings.groq_api_key,
+            model=settings.groq_model,
+            api_url=settings.groq_api_url,
+            max_output_tokens=settings.llm_max_output_tokens,
+            effort=settings.llm_effort,
+            timeout_seconds=settings.llm_timeout_seconds,
+            max_retry_seconds=settings.groq_max_retry_seconds,
         )
 
     from app.integrations.anthropic_llm import AnthropicLLMProvider

@@ -134,12 +134,19 @@ class Settings(BaseSettings):
     # Answer generation and code-change investigation. Separate from the
     # embedding provider: they are different models with different failure modes.
     #
-    # Which vendor is behind `LLMProvider` — "anthropic" (pay-per-token) or
-    # "openrouter" (routes to a configurable model; used here with a free one
-    # for routine development, so this has no ongoing API cost). Switching this
-    # touches no caller: both sides of get_provider() implement the same
-    # Protocol, and nothing above the provider layer knows which is in use.
-    llm_provider: Literal["anthropic", "openrouter"] = Field(
+    # Which vendor is behind `LLMProvider`:
+    #   "anthropic"  — pay-per-token, claude-opus-5.
+    #   "openrouter" — one OpenAI-compatible endpoint in front of many models.
+    #   "gemini"     — Google Gemini API (generativelanguage.googleapis.com),
+    #                  the primary free development stack alongside Gemini
+    #                  embeddings + pgvector.
+    #   "groq"       — Groq's OpenAI-compatible API, openai/gpt-oss-120b. A fast
+    #                  free tier evaluated for tool calling and structured
+    #                  output; Gemini embeddings + pgvector are unchanged.
+    # Switching this touches no caller: every side of get_provider() implements
+    # the same Protocol, and nothing above the provider layer knows which is in
+    # use.
+    llm_provider: Literal["anthropic", "openrouter", "gemini", "groq"] = Field(
         default="anthropic", alias="LLM_PROVIDER"
     )
     llm_model: str = Field(default="claude-opus-5", alias="LLM_MODEL")
@@ -167,6 +174,48 @@ class Settings(BaseSettings):
     openrouter_model: str = Field(default="minimax/minimax-m3:free", alias="OPENROUTER_MODEL")
     openrouter_api_url: str = Field(
         default="https://openrouter.ai/api/v1/chat/completions", alias="OPENROUTER_API_URL"
+    )
+
+    # Gemini as the generative provider. Conceptually separate from the Gemini
+    # *embedding* configuration above — different model, different failure modes
+    # — but the key may be shared: GEMINI_LLM_API_KEY falls back to GEMINI_API_KEY
+    # when left blank (see `gemini_llm_key`). Model verified against Google's live
+    # catalogue 2026-09-01: gemini-2.5-flash is retired for new keys and Google's
+    # own 404 points to gemini-3.6-flash — a stable (non-preview) model with a
+    # 1,048,576-token context, function calling, native responseSchema structured
+    # output and SSE streaming, all confirmed with a real free-tier request.
+    gemini_llm_api_key: str = Field(default="", alias="GEMINI_LLM_API_KEY")
+    gemini_llm_model: str = Field(default="gemini-3.6-flash", alias="GEMINI_LLM_MODEL")
+    # Base URL; the client appends `/models/<model>:generateContent` and
+    # `:streamGenerateContent`.
+    gemini_llm_api_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta", alias="GEMINI_LLM_API_URL"
+    )
+    # Wall-clock ceiling on retrying one call against a rate limit or a transient
+    # 5xx. Deliberately small: the free tier should be backed off from, not
+    # hammered, and a request must fail loudly rather than retry forever.
+    gemini_llm_max_retry_seconds: float = Field(
+        default=30.0, ge=0.0, alias="GEMINI_LLM_MAX_RETRY_SECONDS"
+    )
+
+    # Groq as the generative provider. OpenAI-compatible API
+    # (api.groq.com/openai/v1); model default openai/gpt-oss-120b. Verified
+    # against Groq's live docs 2026-09-01: 131,072-token context, tool use,
+    # JSON-Schema structured output (strict), and reasoning controls. DevPilot
+    # sends reasoning_format=hidden — it never receives reasoning tokens.
+    # Structured Outputs cannot be combined with tools or streaming in one
+    # request; the provider raises a typed capability error rather than a 400.
+    # Free-tier quotas are externally controlled by Groq and can change.
+    groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
+    groq_model: str = Field(default="openai/gpt-oss-120b", alias="GROQ_MODEL")
+    groq_api_url: str = Field(
+        default="https://api.groq.com/openai/v1/chat/completions", alias="GROQ_API_URL"
+    )
+    # Wall-clock ceiling on retrying one call against a rate limit or transient
+    # 5xx. Small on purpose: the free tier is backed off from, not hammered, and
+    # a call must fail loudly rather than retry forever.
+    groq_max_retry_seconds: float = Field(
+        default=30.0, ge=0.0, alias="GROQ_MAX_RETRY_SECONDS"
     )
 
     # ---- Context budget --------------------------------------------------
@@ -239,16 +288,31 @@ class Settings(BaseSettings):
         return self.llm_configured
 
     @property
+    def gemini_llm_key(self) -> str:
+        """The key the Gemini generative provider uses.
+
+        Falls back to the Gemini *embedding* key: one Google API key normally
+        covers both surfaces, so a deployment that already set GEMINI_API_KEY
+        does not have to repeat it. The two settings stay conceptually separate
+        — either can be pointed at a different key — but the common case is one.
+        """
+        return self.gemini_llm_api_key or self.gemini_api_key
+
+    @property
     def llm_configured(self) -> bool:
         """Whether answer generation is possible in this deployment.
 
         Checked before any retrieval work so an unconfigured deployment reports
         a configuration state instead of doing work it cannot finish. Depends
-        on which provider is selected — the other one's key being present (or
+        on which provider is selected — the others' keys being present (or
         absent) is irrelevant.
         """
+        if self.llm_provider == "gemini":
+            return bool(self.gemini_llm_key)
         if self.llm_provider == "openrouter":
             return bool(self.openrouter_api_key)
+        if self.llm_provider == "groq":
+            return bool(self.groq_api_key)
         return bool(self.anthropic_api_key)
 
     @property

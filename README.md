@@ -210,10 +210,12 @@ configured, never the credential itself.
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | OAuth app credentials. |
 | `BACKEND_URL` | Where Next.js reaches the API, server-side only. |
 | `NEXT_PUBLIC_APP_URL` | Public origin, used for OAuth redirects. |
-| `ANTHROPIC_API_KEY` | Language model credential. Without it, Ask and Changes report a configuration state rather than failing obscurely. |
-| `LLM_MODEL` / `LLM_EFFORT` | Model identity and thinking depth. Defaults to `claude-opus-5` at `high`. |
+| `LLM_PROVIDER` | `groq`, `gemini`, `openrouter`, or `anthropic`. See [Language model](#language-model). |
+| `GROQ_API_KEY` / `GROQ_MODEL` | Groq credential and model (`openai/gpt-oss-120b`). Free tier; limits are set by Groq and reported in `x-ratelimit-*` headers, not guaranteed here. |
+| `GEMINI_LLM_API_KEY` / `GEMINI_LLM_MODEL` | Gemini generation credential and model. The key falls back to `GEMINI_API_KEY`; model defaults to `gemini-3.6-flash`. Without a key for the selected provider, Ask and Changes report a configuration state rather than failing obscurely. |
+| `ANTHROPIC_API_KEY` / `LLM_MODEL` / `LLM_EFFORT` | Anthropic credential, model and thinking depth (`claude-opus-5` at `high`). `LLM_EFFORT` also drives OpenRouter reasoning and maps (conservatively) to Groq `reasoning_effort`. |
 | `AGENT_MAX_TOOL_CALLS` | Investigation tool budget. Defaults to 8. |
-| `VOYAGE_API_KEY` | Embedding provider credential. Without it, indexing and search report a configuration error rather than failing obscurely. |
+| `VOYAGE_API_KEY` / `GEMINI_API_KEY` / `EMBEDDING_PROVIDER` | Embedding provider credentials and selector (`gemini` or `voyage`). Without a key, indexing and search report a configuration error rather than failing obscurely. |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | Model identity and vector width. Changing either requires a re-index. |
 | `INDEX_*` / `GITHUB_*` / `SEARCH_*` | Indexing limits, GitHub client tuning, retrieval bounds. |
 
@@ -282,6 +284,102 @@ language model is invoked at query time.
 
 <br>
 
+## Language model
+
+Answer generation and change investigation go through one `LLMProvider`
+interface. Four implementations sit behind it, chosen by `LLM_PROVIDER`;
+nothing above the provider layer knows or cares which is active.
+
+| `LLM_PROVIDER` | Model | Notes |
+| --- | --- | --- |
+| **`groq`** | `openai/gpt-oss-120b` | OpenAI-compatible API on Groq's fast free tier. Tool calling, strict JSON-Schema structured output, reasoning controls. See [Groq provider](#groq-provider). |
+| `gemini` | `gemini-3.6-flash` | Gemini generation + [Gemini embeddings](#semantic-retrieval) + pgvector, no ongoing cost within Google's free-tier quota. |
+| `openrouter` | `minimax/minimax-m3:free` (configurable) | One OpenAI-compatible API in front of many models, some free. |
+| `anthropic` | `claude-opus-5` | Pay-per-token. |
+
+Embeddings, pgvector, retrieval, the agent loop, streaming and citation
+handling are all provider-agnostic — switching `LLM_PROVIDER` (and restarting)
+is the only change. `GROQ_API_KEY` is independent of the Gemini embedding key;
+DevPilot's default stack pairs **Groq generation with Gemini embeddings**.
+
+### Groq provider
+
+**Model: `openai/gpt-oss-120b`** — verified against Groq's live documentation
+(2026‑09‑01):
+
+| Capability | Status |
+| --- | --- |
+| Text generation | Yes |
+| SSE streaming | Yes — genuine incremental chunks, `stream_options.include_usage` for token counts |
+| Function / tool calling | Yes — `search_code` / `read_file` / `find_symbol`, multi-round |
+| JSON-Schema structured output | Yes — `response_format: json_schema`, `strict: true` (constrained decoding) |
+| Reasoning controls | Yes — `reasoning_effort` (`low`/`medium`/`high`), `reasoning_format` |
+| Context window | 131,072 tokens (max output 65,536) |
+
+**Reasoning is never exposed.** The provider always sends
+`reasoning_format: "hidden"`, so DevPilot receives only the final answer, tool
+calls or proposal — never the model's chain of thought. `LLM_EFFORT` maps to
+`reasoning_effort` conservatively (`high` → `medium`; `xhigh`/`max` → `high`),
+because on the free tier reasoning tokens count against a small per-minute
+budget.
+
+**Structured output is real, not prompted.** When a JSON Schema is supplied it
+is enforced by Groq's constrained decoder; application-side validation still
+runs on top. Groq does **not** allow structured output together with tools, or
+together with streaming, in one request — the provider raises a typed
+`llm_capability_unsupported` error rather than passing through a bare 400, and
+the investigation loop keeps its existing fenced-JSON proposal path (which
+tolerates a tool-calling turn and a proposal turn in the same conversation).
+
+**Errors** map to the same taxonomy as every other provider (`llm_unauthorized`,
+`llm_rate_limited`, `llm_timeout`, `llm_context_too_large`, `llm_invalid_response`,
+`llm_refused`). 429 and transient 5xx are retried with bounded exponential
+backoff that honours `Retry-After`, then fail loudly. Provider error bodies are
+logged, never returned.
+
+**Free-plan limits are externally controlled.** Groq sets the free tier's
+requests-per-minute / per-day and tokens-per-minute / per-day, publishes them at
+[console.groq.com/docs/rate-limits](https://console.groq.com/docs/rate-limits),
+and can change them at any time. The live values come back on every response in
+`x-ratelimit-limit-*` / `x-ratelimit-remaining-*` headers (and `retry-after` on
+a 429); the provider captures the most recent set on `GroqLLMProvider.rate_limits`.
+Nothing here is "unlimited" — in particular the free-tier **tokens-per-minute**
+budget is small relative to a full RAG context, so a large repository may need
+`CONTEXT_MAX_CHARS` lowered or a paid Groq tier.
+
+**Switching providers.** Set `LLM_PROVIDER=gemini` / `openrouter` / `anthropic`
+(with the matching key) and restart. No other change.
+
+**Why `gemini-3.6-flash`.** Verified against Google's live model catalogue —
+`gemini-2.5-flash` is retired for new API keys and Google's own 404 response
+points here. It is a **stable** (non-preview) model with a **1,048,576-token**
+context, and a real free-tier request confirmed all four capabilities DevPilot
+needs: **text generation**, **SSE streaming**, **function calling** (the
+`search_code` / `read_file` / `find_symbol` tools), and **native structured
+output** (`responseSchema`). It is Google's current flash model for coding and
+agentic work.
+
+**Capabilities.** The provider validates the configured model against the
+catalogue on first use; a retired or non-generative model id fails with a typed
+capability error rather than a confusing 400 mid-investigation. Streaming is
+real SSE — partial text reaches the caller as the model writes it. Gemini rate
+limits (HTTP 429 / `RESOURCE_EXHAUSTED`) are retried with bounded exponential
+backoff that honours the API's `RetryInfo`, then fail loudly — the free tier is
+backed off from, never hammered.
+
+**Free tier is not unlimited.** Google's free-tier quotas and model
+availability change; treat them as subject to
+[Google's current limits](https://ai.google.dev/gemini-api/docs/rate-limits),
+not a guarantee.
+
+**Switching providers.** Set `LLM_PROVIDER` to `groq`, `anthropic` or
+`openrouter` (with the matching key) and restart the backend. No other change —
+the agent loop, RAG pipeline, streaming and citation handling are
+provider-agnostic. `GEMINI_LLM_API_KEY` is separate from the embedding
+`GEMINI_API_KEY` but falls back to it when blank, so one Google key covers both.
+
+<br>
+
 ## Grounded answers
 
 Retrieval finds the code; the model explains it. Both halves are visible, and the
@@ -293,7 +391,7 @@ flowchart LR
     E --> V[("pgvector")]
     V --> R["Retrieved chunks"]
     R --> C["Context builder"]
-    C --> L["Claude"]
+    C --> L["LLM"]
     L --> A["Answer + citations"]
 ```
 
