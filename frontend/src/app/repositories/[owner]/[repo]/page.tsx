@@ -1,12 +1,26 @@
+import { ChevronRight } from "lucide-react";
+
 import { IndexPanel, type IndexSummary } from "@/components/repository/index-panel";
+import { RecentWork } from "@/components/repository/recent-work";
+import { NotConnectedState } from "@/components/repository/repository-states";
 import { SearchInspector } from "@/components/repository/search-inspector";
 import { searchRepositoryAction } from "@/app/actions";
-import { NotConnectedState } from "@/components/repository/repository-states";
 import { ApiErrorState } from "@/components/ui/error-state";
-import { Panel, PanelHeader } from "@/components/ui/panel";
-import { getLanguages, type LanguageCount, type Repository } from "@/lib/api";
-import { decodeParams, loadRepository, type RepositoryParams } from "@/lib/repository-context";
+import { JourneyTrack } from "@/components/ui/journey";
+import { getLanguages, type Repository } from "@/lib/api";
+import { repositoryPath } from "@/lib/navigation";
+import {
+  decodeParams,
+  loadRepository,
+  loadWorkflowContext,
+  type RepositoryParams,
+} from "@/lib/repository-context";
+import { deriveJourney } from "@/lib/workflow";
 
+/**
+ * Repository overview: where the repository is in its journey → index state
+ * and the next step → recent work → diagnostics for developers who want them.
+ */
 export default async function RepositoryOverviewPage({
   params,
 }: {
@@ -28,13 +42,13 @@ export default async function RepositoryOverviewPage({
   }
 
   const repository = result.data;
-  // Only meaningful once something has been indexed; skipped otherwise so an
-  // unindexed workspace makes one request instead of two.
-  const languages =
-    repository.indexing_status === "indexed" ? await getLanguages(repository.id) : null;
+  const indexed = repository.indexing_status === "indexed";
+  const [context, languages] = await Promise.all([
+    loadWorkflowContext(repository),
+    indexed ? getLanguages(repository.id) : Promise.resolve(null),
+  ]);
 
-  // Bound here so the client component cannot search a different repository
-  // than the one being viewed.
+  // Bound here so the client component cannot search a different repository.
   const repositoryId = repository.id;
   async function searchAction(query: string) {
     "use server";
@@ -43,22 +57,56 @@ export default async function RepositoryOverviewPage({
 
   return (
     <Body>
-      <div className="space-y-6">
+      <div className="space-y-10">
+        <section aria-labelledby="journey-heading">
+          <h2
+            id="journey-heading"
+            className="text-ink-faint text-xs font-semibold tracking-[0.08em] uppercase"
+          >
+            Your progress
+          </h2>
+          <JourneyTrack
+            className="mt-2"
+            steps={deriveJourney(context.workflow, repository.indexing_status)}
+            hrefFor={(step) => repositoryPath(owner, repo, step.segment)}
+          />
+        </section>
+
         <IndexPanel
           repositoryId={repository.id}
           owner={owner}
           name={repo}
           summary={toSummary(repository)}
+          next={context.workflow.next}
+          languages={languages?.ok ? languages.data : []}
         />
 
-        {/* Retrieval is only meaningful once vectors exist, so the inspector
-            appears with the index rather than as a permanently empty panel. */}
-        {repository.indexing_status === "indexed" ? (
-          <SearchInspector action={searchAction} />
-        ) : null}
+        <RecentWork
+          owner={owner}
+          repo={repo}
+          conversations={context.conversations}
+          changes={context.changes}
+        />
 
-        {languages?.ok && languages.data.length > 0 ? (
-          <LanguagePanel languages={languages.data} />
+        {indexed ? (
+          <details className="group">
+            <summary className="text-ink-muted hover:text-ink flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md text-sm transition-colors">
+              <ChevronRight
+                aria-hidden="true"
+                className="size-3.5 transition-transform group-open:rotate-90"
+                strokeWidth={2}
+              />
+              Retrieval diagnostics
+              <span className="text-ink-faint text-xs">— for developers</span>
+            </summary>
+            <p className="text-ink-muted mt-2 max-w-2xl text-sm">
+              See exactly which code a question retrieves — semantic and keyword candidates, scores
+              and the sources an answer would receive — without generating an answer.
+            </p>
+            <div className="mt-4">
+              <SearchInspector action={searchAction} />
+            </div>
+          </details>
         ) : null}
       </div>
     </Body>
@@ -79,37 +127,8 @@ function toSummary(repository: Repository): IndexSummary {
 
 function Body({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8">{children}</div>
-    </div>
-  );
-}
-
-function LanguagePanel({ languages }: { languages: LanguageCount[] }) {
-  const total = languages.reduce((sum, entry) => sum + entry.file_count, 0);
-
-  return (
-    <Panel>
-      <PanelHeader title="Languages" description="Indexed files by detected language." />
-      <ul className="divide-line divide-y">
-        {languages.map((entry) => (
-          <li key={entry.language} className="flex items-center gap-4 px-4 py-2.5">
-            <span className="text-ink w-40 shrink-0 text-xs font-medium">{entry.language}</span>
-            <span
-              aria-hidden="true"
-              className="bg-line h-1 min-w-0 flex-1 overflow-hidden rounded-full"
-            >
-              <span
-                className="bg-accent block h-full rounded-full"
-                style={{ width: `${Math.max(2, (entry.file_count / total) * 100)}%` }}
-              />
-            </span>
-            <span className="text-ink-muted w-12 shrink-0 text-right font-mono text-xs">
-              {entry.file_count}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </Panel>
+    <main className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-3xl px-6 py-8">{children}</div>
+    </main>
   );
 }

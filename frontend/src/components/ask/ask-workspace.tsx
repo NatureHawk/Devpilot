@@ -1,56 +1,34 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { ConversationPane, type RecentConversation } from "@/components/ask/conversation-pane";
 
-import { ContextPanel } from "@/components/ask/context-panel";
-import { ContextRail } from "@/components/ask/context-rail";
-import { ConversationPane } from "@/components/ask/conversation-pane";
-import type { Repository } from "@/lib/api";
-import type { AskSource } from "@/lib/ask-stream";
-
-/**
- * Holds the state the three panes share.
- *
- * Sources belong here rather than in the conversation, because both the answer
- * and the context panel address the same evidence: clicking a citation in one
- * selects it in the other.
- */
+/** The Ask screen for one repository. */
 export function AskWorkspace({
-  repository,
   repositoryId,
+  owner,
+  name,
   disabledReason,
+  blockedAction,
+  recentConversations,
+  initialConversationId,
 }: {
-  repository: Repository | null;
   repositoryId: string | null;
+  owner: string;
+  name: string;
   disabledReason: string | null;
+  blockedAction: { label: string; href: string } | null;
+  recentConversations: RecentConversation[];
+  initialConversationId: string | null;
 }) {
-  const [sources, setSources] = useState<AskSource[]>([]);
-  const [activeLabel, setActiveLabel] = useState<string | null>(null);
-
-  const handleSources = useCallback((next: AskSource[]) => {
-    setSources(next);
-    setActiveLabel(null);
-  }, []);
-
-  const handleSelect = useCallback((label: string) => {
-    setActiveLabel((current) => (current === label ? null : label));
-  }, []);
-
   return (
-    <div className="flex min-h-0 flex-1">
-      <ContextRail repository={repository} />
-      <ConversationPane
-        repositoryId={repositoryId}
-        disabledReason={disabledReason}
-        onSourcesChange={handleSources}
-        activeLabel={activeLabel}
-        onSelectSource={handleSelect}
-      />
-      <ContextPanel
-        sources={sources}
-        activeLabel={activeLabel}
-        onSelectSource={handleSelect}
-      />
-    </div>
+    <ConversationPane
+      repositoryId={repositoryId}
+      owner={owner}
+      name={name}
+      disabledReason={disabledReason}
+      blockedAction={blockedAction}
+      recentConversations={recentConversations}
+      initialConversationId={initialConversationId}
+    />
   );
 }

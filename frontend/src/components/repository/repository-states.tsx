@@ -1,23 +1,20 @@
 import { ButtonLink } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Panel } from "@/components/ui/panel";
 
 /**
- * Shown on every workspace tab when the address does not correspond to a
- * connected repository. The URL is honoured as a valid destination — it is the
- * repository record that is missing.
+ * Shown on every repository screen when the address does not match a connected
+ * repository. The URL is a valid destination — it is the connection that is
+ * missing, so the one action is to make it.
  */
 export function NotConnectedState({ owner, repo }: { owner: string; repo: string }) {
   return (
-    <Panel>
-      <EmptyState
-        title={`${owner}/${repo} is not connected`}
-        description="DevPilot only reads repositories that have been connected to this workspace. Connect it to give DevPilot access to the code, then index it to make the code searchable."
-      >
-        <ButtonLink href="/repositories/connect" variant="primary" size="sm">
-          Connect repository
-        </ButtonLink>
-      </EmptyState>
-    </Panel>
+    <EmptyState
+      title={`${owner}/${repo} isn't connected`}
+      description="DevPilot only reads repositories you connect. Connect it, then index it to start asking questions about its code."
+    >
+      <ButtonLink href="/repositories/connect" variant="primary" size="lg" forward>
+        Connect repository
+      </ButtonLink>
+    </EmptyState>
   );
 }

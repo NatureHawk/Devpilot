@@ -1,35 +1,64 @@
 import { AskWorkspace } from "@/components/ask/ask-workspace";
 import { getIntegrations, type ApiResult, type Repository } from "@/lib/api";
-import { decodeParams, loadRepository, type RepositoryParams } from "@/lib/repository-context";
+import { repositoryPath } from "@/lib/navigation";
+import {
+  decodeParams,
+  loadConversations,
+  loadRepository,
+  type RepositoryParams,
+} from "@/lib/repository-context";
+
+type Blocker = { reason: string; action: { label: string; href: string } | null };
 
 /**
- * States the concrete reason asking is unavailable, checked in the order a user
- * would have to resolve them. Returns null once nothing blocks a question.
+ * The concrete reason asking is unavailable, in the order a user would resolve
+ * them, with the action that resolves it when there is one.
  */
-function blockingReason(
+function blocker(
+  owner: string,
+  repo: string,
   repositoryResult: ApiResult<Repository>,
   aiConfigured: boolean,
   embeddingsConfigured: boolean,
-): string | null {
+): Blocker | null {
   if (!repositoryResult.ok) {
     return repositoryResult.error.code === "not_found"
-      ? "Connect this repository before asking questions about it."
-      : "The DevPilot API is not responding, so questions cannot be sent.";
+      ? {
+          reason: "DevPilot can only answer questions about repositories you connect.",
+          action: { label: "Connect repository", href: "/repositories/connect" },
+        }
+      : { reason: "The DevPilot API isn't responding, so questions can't be sent.", action: null };
   }
   if (repositoryResult.data.indexing_status !== "indexed") {
-    return "Index this repository so DevPilot can retrieve the code an answer depends on.";
+    return {
+      reason: "DevPilot answers from the indexed code, so this repository needs indexing first.",
+      action: { label: "Index repository", href: repositoryPath(owner, repo) },
+    };
   }
   if (!embeddingsConfigured) {
-    return "No embedding provider is configured, so the repository cannot be searched.";
+    return {
+      reason: "No embedding provider is configured, so the code can't be searched.",
+      action: { label: "Open settings", href: "/settings" },
+    };
   }
   if (!aiConfigured) {
-    return "No language model is configured for this deployment.";
+    return {
+      reason: "No language model is configured for this deployment.",
+      action: { label: "Open settings", href: "/settings" },
+    };
   }
   return null;
 }
 
-export default async function AskPage({ params }: { params: Promise<RepositoryParams> }) {
+export default async function AskPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<RepositoryParams>;
+  searchParams: Promise<{ conversation?: string | string[] }>;
+}) {
   const { owner, repo } = decodeParams(await params);
+  const { conversation } = await searchParams;
   const [repositoryResult, integrationsResult] = await Promise.all([
     loadRepository(owner, repo),
     getIntegrations(),
@@ -38,16 +67,30 @@ export default async function AskPage({ params }: { params: Promise<RepositoryPa
   const integrations = integrationsResult.ok ? integrationsResult.data.integrations : [];
   const configured = (name: string) =>
     integrations.find((integration) => integration.name === name)?.configured ?? false;
-  const aiConfigured = configured("ai_provider");
-  const embeddingsConfigured = configured("embeddings");
 
   const repository = repositoryResult.ok ? repositoryResult.data : null;
+  const conversations = repository ? await loadConversations(repository.id) : null;
+  const blocked = blocker(
+    owner,
+    repo,
+    repositoryResult,
+    configured("ai_provider"),
+    configured("embeddings"),
+  );
 
   return (
     <AskWorkspace
-      repository={repository}
       repositoryId={repository?.id ?? null}
-      disabledReason={blockingReason(repositoryResult, aiConfigured, embeddingsConfigured)}
+      owner={owner}
+      name={repo}
+      disabledReason={blocked?.reason ?? null}
+      blockedAction={blocked?.action ?? null}
+      recentConversations={
+        conversations?.ok
+          ? conversations.data.items.map(({ id, title, created_at }) => ({ id, title, created_at }))
+          : []
+      }
+      initialConversationId={typeof conversation === "string" ? conversation : null}
     />
   );
 }

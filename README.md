@@ -27,6 +27,31 @@ Connect a repository, and DevPilot:
 
 <br>
 
+## The guided experience
+
+DevPilot walks you through a repository as a journey, and always makes the next action obvious:
+
+```
+Connect → Index → Understand → Investigate → Review → Ship
+```
+
+- **Home** continues where you left off: the most recently active repository shows its progress
+  and one primary next step; the others show how far each has come.
+- **Understand** opens as a guided exploration — starting-point questions grouped by intent, with
+  your own question as the alternative — and becomes a compact, structured report once you ask:
+  answer, evidence, what it means, and **Investigate this code →**.
+- **Citations are navigation.** Each one opens the exact file and lines it came from; retrieval
+  scores stay behind a diagnostics toggle.
+- **The sidebar is a path**, not a list of routes: completed steps are checked, the next step is
+  marked, future steps are subdued — and nothing is blocked.
+- **Progress is never invented.** Every state comes from real records, and long-running steps show
+  what they do rather than fake percentages.
+
+Design, derivation rules and the reusable patterns are documented in
+[docs/guided-experience.md](docs/guided-experience.md).
+
+<br>
+
 ## Architecture
 
 ```mermaid
@@ -105,6 +130,14 @@ rather than by copying the enclosing class into every method.
 
 A symbol larger than the chunk limit is split into parts that record `part_index` / `part_count`,
 so nothing is silently truncated. A file with no recognisable structure falls back to line windows.
+
+**Trivia is attached, not stored alone.** A divider such as `# --- PAGE 2: COMMERCIAL ---` or the
+`;` closing `const Page = () => {...};` carries no code. Stored as its own chunk, its embedding is
+mostly the path header, which sits close to *every* question and outranks real code. So a comment
+block directly above a declaration becomes part of that declaration, and closing punctuation joins
+the declaration it closes. Only trivia moves: module code (imports, constants, setup) stays its own
+chunk, two declarations are never merged, the size limit still applies, and byte ranges stay
+contiguous — nothing is duplicated or dropped.
 
 ### Resource limits
 
@@ -218,6 +251,8 @@ configured, never the credential itself.
 | `VOYAGE_API_KEY` / `GEMINI_API_KEY` / `EMBEDDING_PROVIDER` | Embedding provider credentials and selector (`gemini` or `voyage`). Without a key, indexing and search report a configuration error rather than failing obscurely. |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | Model identity and vector width. Changing either requires a re-index. |
 | `INDEX_*` / `GITHUB_*` / `SEARCH_*` | Indexing limits, GitHub client tuning, retrieval bounds. |
+| `RETRIEVAL_SEMANTIC_CANDIDATES` / `RETRIEVAL_LEXICAL_CANDIDATES` | Candidate pool sizes before fusion (40 / 40). |
+| `CONTEXT_MAX_CHARS` / `CONTEXT_MAX_SOURCES` | Retrieved-source budget per answer. Unset chars uses the provider default (Groq 12,000; OpenRouter 24,000; Gemini/Anthropic 40,000); sources default to 12. |
 
 <br>
 
@@ -264,23 +299,76 @@ nearer.
 > each other, not as an absolute relevance threshold — there is no calibrated cutoff above which a
 > result is "correct".
 
-**Top-K.** Defaults to 8, bounded to 50. Ordering and limiting happen in the database on the indexed
-distance expression, so only the returned rows ever materialise their source content.
+**Candidate pool.** 40 nearest chunks by default (`RETRIEVAL_SEMANTIC_CANDIDATES`). Ordering and
+limiting happen in the database on the indexed distance expression, so only the returned rows ever
+materialise their source content.
 
 **Indexing is atomic across embeddings.** A repository reaches `indexed` only after its vectors are
 stored, so that state means *searchable*, not merely *parsed*. If the provider fails, the attempt is
 marked `failed` and the previous index is left intact. Re-indexing replaces vectors wholesale, so old
 and new embeddings never mix.
 
+### Hybrid retrieval
+
+Meaning is not enough on its own. "Where is `useMemo` used?" or "what does `get_db` do?" name a token
+that either appears in the code or does not — a lexical question. So every query runs two retrievals
+over the same chunks, in the same PostgreSQL:
+
+```mermaid
+flowchart LR
+    Q["Question"] --> S["pgvector cosine<br/>top 40"]
+    Q --> L["Full-text search<br/>top 40"]
+    S --> F["Rank fusion"]
+    L --> F
+    F --> D["De-duplicate"]
+    D --> C["Context selection<br/>(budget, cap, diversity)"]
+```
+
+**Lexical search** is PostgreSQL full-text search over a generated `tsvector` with a GIN index — no
+separate search engine. Terms are normalised in the application, because PostgreSQL's parser is
+built for prose: it splits `get_db` but keeps `useMemo` whole and treats `/analytics/operations` as a
+single token. DevPilot stores the joined identifier and its parts (`get_db` → `getdb get db`), with
+path and symbol names weighted above body text. Question terms are weighted by inverse document
+frequency, and terms present in more than half the repository's chunks are left out of the query.
+
+**Fusion** is Reciprocal Rank Fusion over four ranked lists — semantic, lexical, *named* (the
+question names the chunk's symbol or file) and *mentioned* (an identifier from the question appears
+verbatim). RRF combines ranks, never raw scores: cosine similarity and text rank live on unrelated,
+uncalibrated scales, and one embedding model's cosine range is not another's. A chunk near the top of
+several lists beats one at the top of a single list; a definition of `get_db` both names and mentions
+it, so it outranks its callers. The fused value orders candidates and is not a probability. The
+original cosine score is kept on every candidate.
+
+**Context selection** takes candidates best-first until `CONTEXT_MAX_CHARS` or
+`CONTEXT_MAX_SOURCES` is reached. Only supported candidates are eligible — an exact match, a strong
+lexical match (at least half the question's term weight), or a chunk whose semantic score is clearly
+above chance for its rank (below) — so the repository is never sent just because it fits, and a chunk
+sharing one incidental word with the question is not evidence. After three chunks from one file,
+that file's remaining chunks wait behind other files' evidence. A chunk that does not fit is skipped
+for a smaller one rather than cut. When nothing is evidence, only the three nearest chunks by meaning
+are sent, so the model can say what the repository does contain. The budget is characters, which only
+approximate tokens (code averages roughly 3–4 characters per token); the default follows the selected
+provider — 12,000 for Groq, whose free tier allows 8K tokens per minute for the whole request.
+
+**Evidence strength** (`none` / `weak` / `useful`) is classified from signals that do not depend on
+an embedding model's score scale: whether the question names an existing symbol, file or identifier;
+whether a strong lexical match is also in the semantic top 10 (two independent methods agreeing); and
+the best semantic match's **excess over chance**. Even unrelated chunks produce a "best" score about
+two standard deviations above the pool mean when there are 40 of them, so a raw separation cut-off
+would mistake that for evidence. Instead each candidate's score, in standard deviations of this
+query's own pool, is compared with where the k-th best of n unrelated scores would be expected to
+fall (Blom's normal order-statistic approximation). Half a standard deviation above chance is
+evidence; a quarter is thin evidence. On the RetailHub evaluation set every supported question
+cleared +0.6 and every unsupported one stayed at or below +0.05. Comment-only chunks never count as
+evidence, and no confidence percentage is ever produced.
+
 ### Retrieval inspector
 
-The repository workspace includes a search inspector: a query box that shows the ranked chunks with
-their similarity scores, symbols and line ranges, each expandable to its source. It is an
-engineering instrument, not a chat interface — retrieval quality is worth judging on its own, before
-any model is asked to write prose over it.
-
-**This milestone implements semantic retrieval, not answer generation.** Search returns code. No
-language model is invoked at query time.
+The repository workspace includes a retrieval inspector. For a query it shows the sources an answer
+would actually receive — file, symbol, line range, semantic score, keyword rank and exact-match kind,
+each expandable to source — with the budget used and the evidence strength, plus the semantic and
+keyword candidate lists they were fused from, collapsed. It answers "did retrieval choose the right
+code?" before any model writes prose over it. No language model is invoked.
 
 <br>
 
@@ -405,15 +493,17 @@ control that opens the exact file, symbol and line range it refers to. A claim y
 cannot trace is a claim you cannot check — citations are what make an answer auditable
 instead of merely plausible.
 
-**Context construction.** Retrieved chunks are deduplicated, grouped by file, labelled
-for citation, and packed against a character budget, highest-ranked first. Nothing is
-summarised by a model before the answer — that would add a second call, a second cost,
-and a second place for detail to go missing.
+**Context construction.** Retrieved chunks are fused, deduplicated, selected against a
+character budget (see [Hybrid retrieval](#hybrid-retrieval)), grouped by file in line order,
+and labelled for citation. Nothing is summarised by a model before the answer — that would
+add a second call, a second cost, and a second place for detail to go missing.
 
 **Honest uncertainty.** Retrieval strength is classified as `none`, `weak` or `useful`
-from the top score, the result count and file diversity, and the prompt is adjusted to
-match. These are not probabilities — cosine similarity is not calibrated — so they only
-decide how firmly the answer states that evidence is thin. Asked about a component that
+from exact matches, agreement between semantic and lexical retrieval, and how clearly the
+best semantic match stands out within its own query, and the prompt is adjusted to match.
+These are not probabilities — similarity scores are not calibrated — so they only decide
+how firmly the answer states that evidence is thin. With no evidence, only a few nearest
+chunks are sent rather than padding the prompt. Asked about a component that
 does not exist, DevPilot says the repository does not show one rather than inventing a
 path.
 
@@ -538,7 +628,7 @@ text in a file that DevPilot will later read.
 | `users` | GitHub identity and the encrypted access token. |
 | `repositories` | Connected repositories and their indexing state, commit SHA and counts. |
 | `files` | One row per indexed path, with content, language and parse outcome. |
-| `code_chunks` | Structural chunks with symbol, parent symbol, line and byte ranges. |
+| `code_chunks` | Structural chunks with symbol, parent symbol, line and byte ranges, and normalised full-text terms with a generated, GIN-indexed `tsvector`. |
 | `chunk_embeddings` | One pgvector embedding per chunk per model, with its dimensions. |
 | `message_sources` | Citations: which chunk an answer drew on, with its location copied so it survives a re-index. |
 | `proposed_changes` | Change requests, their investigation, validated edits, diff, review status, and — once approved — the branch, commit and pull request DevPilot created. |
@@ -572,7 +662,7 @@ isn't — deleting a user doesn't delete the repositories they connected.
 | `POST /api/v1/repositories` | Connect a repository by `owner/name`. |
 | `GET /api/v1/repositories/{owner}/{name}` | One repository. |
 | `POST /api/v1/repositories/{id}/index` | Index a repository. |
-| `POST /api/v1/repositories/{id}/search` | Semantic search over indexed chunks. |
+| `POST /api/v1/repositories/{id}/search` | Hybrid retrieval: the sources an answer would receive, plus semantic and keyword candidates. No LLM call. |
 | `POST /api/v1/repositories/{id}/ask` | Grounded answer, streamed as server-sent events. |
 | `GET /api/v1/repositories/{id}/conversations` | Conversation history. |
 | `POST /api/v1/repositories/{id}/changes` | Investigate a request and propose a patch. |
@@ -637,6 +727,14 @@ small owned abstractions, so every layer stays inspectable.
 - **The secret scan is a pattern check, not a security boundary.** It catches common,
   recognisable credential shapes — it is not a substitute for a real secret-scanning
   service on the repository itself.
+- **Retrieval rules were checked on one small repository.** Trivia attachment, evidence
+  eligibility and the excess-over-chance cut-offs were evaluated on a 46-chunk repository with
+  13 questions. Larger repositories may need them re-checked.
+- **Keyword search has no stemming or synonyms.** "returns" does not match `return`, so vaguely
+  worded questions ("how is the app storing data") rely on semantic retrieval alone and can still
+  miss the right code.
+- **Excess over chance is a heuristic.** It treats a query's semantic score pool as roughly normal;
+  it orders evidence honestly but is not a calibrated probability.
 
 <br>
 

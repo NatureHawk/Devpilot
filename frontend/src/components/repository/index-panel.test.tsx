@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IndexPanel, type IndexSummary } from "@/components/repository/index-panel";
+import type { NextAction } from "@/lib/workflow";
 
 const indexAction = vi.hoisted(() => vi.fn());
 vi.mock("@/app/actions", () => ({ indexRepositoryAction: indexAction }));
@@ -27,8 +28,21 @@ const INDEXED: IndexSummary = {
   error: null,
 };
 
-function renderPanel(summary: IndexSummary) {
-  return render(<IndexPanel repositoryId="repo-1" owner="acme" name="widgets" summary={summary} />);
+const OUTCOME = {
+  filesIndexed: 7,
+  filesParsed: 6,
+  chunksCreated: 99,
+  chunksEmbedded: 99,
+  filesSkipped: 2,
+  parseFailures: 0,
+  complete: true,
+  commitSha: "1234567890",
+};
+
+function renderPanel(summary: IndexSummary, next?: NextAction) {
+  return render(
+    <IndexPanel repositoryId="repo-1" owner="acme" name="widgets" summary={summary} next={next} />,
+  );
 }
 
 beforeEach(() => {
@@ -36,28 +50,18 @@ beforeEach(() => {
 });
 
 describe("IndexPanel — not indexed", () => {
-  it("offers indexing and explains what it does", () => {
+  it("makes indexing the one next step and says what it does", () => {
     renderPanel(NOT_INDEXED);
 
     expect(screen.getByRole("heading", { name: /hasn't been indexed yet/i })).toBeVisible();
-    expect(screen.getByText(/prepare its source for code-aware search/i)).toBeVisible();
+    expect(screen.getByRole("region", { name: "Index widgets" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Index repository" })).toBeEnabled();
+    expect(screen.getByText(/Nothing is written to GitHub/)).toBeVisible();
   });
 
   it("runs the real indexing action for this repository", async () => {
     const user = userEvent.setup();
-    indexAction.mockResolvedValue({
-      ok: true,
-      data: {
-        filesIndexed: 5,
-        filesParsed: 4,
-        chunksCreated: 20,
-        filesSkipped: 1,
-        parseFailures: 0,
-        complete: true,
-        commitSha: "deadbeef",
-      },
-    });
+    indexAction.mockResolvedValue({ ok: true, data: OUTCOME });
 
     renderPanel(NOT_INDEXED);
     await user.click(screen.getByRole("button", { name: "Index repository" }));
@@ -67,7 +71,7 @@ describe("IndexPanel — not indexed", () => {
 });
 
 describe("IndexPanel — indexing", () => {
-  it("shows a pending state without inventing progress", async () => {
+  it("explains what the run does without inventing progress", async () => {
     const user = userEvent.setup();
     // Never resolves: holds the component in its in-flight state.
     indexAction.mockImplementation(() => new Promise(() => {}));
@@ -76,78 +80,77 @@ describe("IndexPanel — indexing", () => {
     await user.click(screen.getByRole("button", { name: "Index repository" }));
 
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /Indexing repository/i })).toBeVisible(),
+      expect(screen.getByRole("heading", { name: "Indexing widgets" })).toBeVisible(),
     );
-    // No fabricated percentage or file counter while the run is in flight.
+    const stages = screen.getByRole("list", { name: "Indexing" });
+    expect(stages).toHaveTextContent("Generating embeddings for search");
+    // Stages are shown running together — none is claimed done while the request is open.
+    expect(screen.queryByText("(done)")).toBeNull();
     expect(screen.queryByText(/%/)).toBeNull();
+    expect(screen.getByText(/Running for/)).toBeVisible();
   });
 });
 
 describe("IndexPanel — indexed", () => {
-  it("reports the real statistics from the last run", () => {
-    renderPanel(INDEXED);
+  it("summarises the real index and points to the workflow's next step", () => {
+    renderPanel(INDEXED, {
+      stage: "review",
+      segment: "review",
+      status: "Change awaiting review",
+      title: "Review the proposed change",
+      description: "Read the diff.",
+      label: "Review diff",
+    });
 
-    expect(screen.getByRole("heading", { name: "Repository indexed" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "widgets is indexed" })).toBeVisible();
     expect(screen.getByText("42")).toBeVisible();
     expect(screen.getByText("310")).toBeVisible();
-    // Commits are shown short, the way git does.
     expect(screen.getByText("abcdef1")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Review diff" })).toHaveAttribute(
+      "href",
+      "/repositories/acme/widgets/review",
+    );
   });
 
-  it("offers re-indexing", () => {
+  it("keeps re-indexing available but quiet", () => {
     renderPanel(INDEXED);
 
     expect(screen.getByRole("button", { name: "Re-index" })).toBeEnabled();
   });
 
-  it("shows the counts returned by a run that just completed", async () => {
+  it("after a successful run, says so and makes Ask the next step", async () => {
     const user = userEvent.setup();
-    indexAction.mockResolvedValue({
-      ok: true,
-      data: {
-        filesIndexed: 7,
-        filesParsed: 6,
-        chunksCreated: 99,
-        filesSkipped: 2,
-        parseFailures: 0,
-        complete: true,
-        commitSha: "1234567890",
-      },
-    });
+    indexAction.mockResolvedValue({ ok: true, data: OUTCOME });
 
     renderPanel(NOT_INDEXED);
     await user.click(screen.getByRole("button", { name: "Index repository" }));
 
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: "Repository indexed" })).toBeVisible(),
+      expect(screen.getByRole("heading", { name: "widgets is ready" })).toBeVisible(),
     );
     expect(screen.getByText("99")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Ask about this repository" })).toHaveAttribute(
+      "href",
+      "/repositories/acme/widgets/ask",
+    );
   });
 
   it("flags an index where some supported files failed to parse", async () => {
     const user = userEvent.setup();
     indexAction.mockResolvedValue({
       ok: true,
-      data: {
-        filesIndexed: 7,
-        filesParsed: 5,
-        chunksCreated: 40,
-        filesSkipped: 0,
-        parseFailures: 2,
-        complete: false,
-        commitSha: "abc1234",
-      },
+      data: { ...OUTCOME, parseFailures: 2, complete: false },
     });
 
     renderPanel(NOT_INDEXED);
     await user.click(screen.getByRole("button", { name: "Index repository" }));
 
-    await waitFor(() => expect(screen.getByText("Partially parsed")).toBeVisible());
+    await waitFor(() => expect(screen.getByText(/Partially parsed/)).toBeVisible());
   });
 });
 
 describe("IndexPanel — failed", () => {
-  it("shows the stored failure and offers a retry", () => {
+  it("shows the stored failure and makes retrying the next step", () => {
     renderPanel({
       ...NOT_INDEXED,
       status: "failed",
@@ -155,7 +158,7 @@ describe("IndexPanel — failed", () => {
     });
 
     expect(screen.getByRole("heading", { name: "Indexing failed" })).toBeVisible();
-    expect(screen.getByText(/rate limit has been reached/i)).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(/rate limit has been reached/i);
     expect(screen.getByRole("button", { name: "Retry indexing" })).toBeEnabled();
   });
 

@@ -185,7 +185,8 @@ export type IndexRun = {
 
 export type LanguageCount = { language: string; file_count: number };
 
-export type SearchResult = {
+/** One retrieval candidate with the signals that ranked it. None of these are probabilities. */
+export type RetrievalCandidate = {
   chunk_id: string;
   file_path: string;
   language: string;
@@ -194,15 +195,42 @@ export type SearchResult = {
   chunk_type: string;
   start_line: number;
   end_line: number;
+  /** Cosine similarity in [-1, 1]; a ranking signal. */
+  semantic_score: number;
+  semantic_rank: number | null;
+  lexical_rank: number | null;
+  /** Share of the question's informative term weight matched, 0–1. */
+  lexical_score: number;
+  matched_terms: string[];
+  exact_match: "symbol" | "path" | "identifier" | null;
+  /** Position in the fused ranking; null for a de-duplicated copy. */
+  final_rank: number | null;
+  /** Comments or punctuation only; never used as evidence. */
+  low_value: boolean;
+};
+
+/** A source selected into the answer context. */
+export type SearchResult = RetrievalCandidate & {
   content: string;
-  /** Cosine similarity in [-1, 1]; a ranking signal, not a probability. */
+  /** Same as semantic_score. */
   score: number;
 };
 
+export type RetrievalStrength = "none" | "weak" | "useful";
+
 export type SearchResponse = {
+  /** What an answer would receive, in citation order. */
   results: SearchResult[];
+  semantic_candidates: RetrievalCandidate[];
+  lexical_candidates: RetrievalCandidate[];
+  strength: RetrievalStrength;
   model: string;
   searched_chunks: number;
+  query_terms: string[];
+  lexical_available: boolean;
+  context_chars: number;
+  context_budget: number;
+  max_sources: number;
 };
 
 export function listRepositories(): Promise<ApiResult<ListResponse<Repository>>> {
@@ -268,11 +296,12 @@ export function runIndex(repositoryId: string): Promise<ApiResult<IndexRun>> {
 export function searchRepository(
   repositoryId: string,
   query: string,
-  topK: number,
+  topK?: number,
 ): Promise<ApiResult<SearchResponse>> {
   return request<SearchResponse>(`/api/v1/repositories/${repositoryId}/search`, {
     method: "POST",
-    body: { query, top_k: topK },
+    // Omitted top_k lets the server's CONTEXT_MAX_SOURCES decide.
+    body: topK === undefined ? { query } : { query, top_k: topK },
   });
 }
 
@@ -326,18 +355,20 @@ export type ProposedChange = {
 export function listChanges(
   repositoryId: string,
 ): Promise<ApiResult<ListResponse<ProposedChange>>> {
-  return request<ListResponse<ProposedChange>>(
-    `/api/v1/repositories/${repositoryId}/changes`,
-  );
+  return request<ListResponse<ProposedChange>>(`/api/v1/repositories/${repositoryId}/changes`);
 }
 
 export function createChange(
   repositoryId: string,
   changeRequest: string,
+  conversationId?: string,
 ): Promise<ApiResult<ProposedChange>> {
   return request<ProposedChange>(`/api/v1/repositories/${repositoryId}/changes`, {
     method: "POST",
-    body: { request: changeRequest },
+    // Linking the conversation records which question the investigation grew from.
+    body: conversationId
+      ? { request: changeRequest, conversation_id: conversationId }
+      : { request: changeRequest },
     // Investigation runs several model turns; it needs the indexing budget,
     // not the default request budget.
     timeoutMs: INDEXING_TIMEOUT_MS,
@@ -362,4 +393,49 @@ export function executeChange(changeId: string): Promise<ApiResult<ProposedChang
 
 export function getLanguages(repositoryId: string): Promise<ApiResult<LanguageCount[]>> {
   return request<LanguageCount[]>(`/api/v1/repositories/${repositoryId}/languages`);
+}
+
+/** A citation stored with a past answer. Source text is not stored with it. */
+export type ConversationSource = {
+  label: string;
+  chunk_id: string | null;
+  file_path: string;
+  symbol: string | null;
+  start_line: number;
+  end_line: number;
+  language: string | null;
+  score: number;
+};
+
+export type ConversationMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  model: string | null;
+  created_at: string;
+  sources: ConversationSource[];
+};
+
+export type Conversation = {
+  id: string;
+  repository_id: string;
+  title: string | null;
+  created_at: string;
+  /** Empty in list responses; populated when one conversation is read. */
+  messages: ConversationMessage[];
+};
+
+export function listConversations(
+  repositoryId: string,
+): Promise<ApiResult<ListResponse<Conversation>>> {
+  return request<ListResponse<Conversation>>(`/api/v1/repositories/${repositoryId}/conversations`);
+}
+
+export function getConversation(
+  repositoryId: string,
+  conversationId: string,
+): Promise<ApiResult<Conversation>> {
+  return request<Conversation>(
+    `/api/v1/repositories/${repositoryId}/conversations/${encodeURIComponent(conversationId)}`,
+  );
 }

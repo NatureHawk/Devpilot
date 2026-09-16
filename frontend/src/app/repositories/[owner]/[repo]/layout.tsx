@@ -1,23 +1,31 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
+import { AppShell } from "@/components/layout/app-shell";
+import { WorkflowNav } from "@/components/layout/workflow-nav";
 import { RepositoryHeader } from "@/components/repository/repository-header";
-import { WorkspaceTabs } from "@/components/repository/workspace-tabs";
-import { decodeParams, loadRepository, type RepositoryParams } from "@/lib/repository-context";
+import {
+  decodeParams,
+  loadRepository,
+  loadWorkflowContext,
+  type RepositoryParams,
+} from "@/lib/repository-context";
 
 export async function generateMetadata({
   params,
 }: {
   params: Promise<RepositoryParams>;
 }): Promise<Metadata> {
-  const { owner, repo } = decodeParams(await params);
-  return { title: `${owner}/${repo}` };
+  const { repo } = decodeParams(await params);
+  return { title: repo };
 }
 
 /**
- * Workspace chrome shared by every repository tab. The record is loaded here so
- * the header can reflect real state; `loadRepository` is request-cached, so the
- * page below does not trigger a second call.
+ * Chrome shared by every screen inside a repository.
+ *
+ * The sidebar carries the repository's workflow, derived from its real
+ * records, so every screen shows what is done and what comes next. Loaders are
+ * request-cached, so pages below reuse these reads.
  */
 export default async function RepositoryLayout({
   children,
@@ -29,12 +37,18 @@ export default async function RepositoryLayout({
   const { owner, repo } = decodeParams(await params);
   const result = await loadRepository(owner, repo);
   const repository = result.ok ? result.data : null;
+  const context = repository ? await loadWorkflowContext(repository) : null;
 
   return (
-    <>
+    <AppShell
+      workflowNav={
+        context ? (
+          <WorkflowNav owner={owner} repo={repo} stages={context.workflow.stages} />
+        ) : undefined
+      }
+    >
       <RepositoryHeader owner={owner} repo={repo} repository={repository} />
-      <WorkspaceTabs owner={owner} repo={repo} />
       {children}
-    </>
+    </AppShell>
   );
 }

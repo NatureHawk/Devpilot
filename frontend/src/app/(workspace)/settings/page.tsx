@@ -1,12 +1,11 @@
 import type { Metadata } from "next";
 
 import { PageBody, PageHeader, PageTitle } from "@/components/layout/page-header";
+import { AccountSection } from "@/components/settings/account-section";
 import { SettingsRow, SettingsStatus } from "@/components/settings/settings-row";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
-import { EmptyState } from "@/components/ui/empty-state";
 import { ApiErrorState } from "@/components/ui/error-state";
 import { Panel, PanelHeader } from "@/components/ui/panel";
-import { AccountSection } from "@/components/settings/account-section";
 import { getCurrentUser, getIntegrations, type Integration } from "@/lib/api";
 
 export const metadata: Metadata = { title: "Settings" };
@@ -15,8 +14,11 @@ export default async function SettingsPage() {
   const [result, currentUser] = await Promise.all([getIntegrations(), getCurrentUser()]);
   const user = currentUser.ok ? currentUser.data : null;
   const integrations: Integration[] = result.ok ? result.data.integrations : [];
-  const github = integrations.find((integration) => integration.name === "github");
-  const aiProvider = integrations.find((integration) => integration.name === "ai_provider");
+  const find = (name: Integration["name"]) =>
+    integrations.find((integration) => integration.name === name);
+  const github = find("github");
+  const aiProvider = find("ai_provider");
+  const embeddings = find("embeddings");
 
   return (
     <>
@@ -24,8 +26,8 @@ export default async function SettingsPage() {
         <PageTitle>Settings</PageTitle>
       </PageHeader>
 
-      <PageBody className="[&_section]:scroll-mt-6">
-        <div className="space-y-6">
+      <PageBody>
+        <div className="max-w-3xl space-y-6">
           {!result.ok ? <ApiErrorState error={result.error} /> : null}
 
           <Panel>
@@ -35,23 +37,21 @@ export default async function SettingsPage() {
 
           <Panel>
             <PanelHeader title="Appearance" />
-            <div className="divide-line divide-y">
-              <SettingsRow
-                label="Theme"
-                description="Dark is the default. System follows your operating system setting. The choice is stored in this browser."
-                control={<ThemeToggle />}
-              />
-            </div>
+            <SettingsRow
+              label="Theme"
+              description="Dark is the default. System follows your operating system. The choice is stored in this browser."
+              control={<ThemeToggle />}
+            />
           </Panel>
 
           <Panel>
-            <PanelHeader title="GitHub connection" />
+            <PanelHeader title="GitHub" />
             <div className="divide-line divide-y">
               <SettingsRow
                 label="Credentials"
                 description={
                   github?.configured
-                    ? "This deployment has GitHub credentials configured in its environment."
+                    ? "This deployment has GitHub OAuth credentials."
                     : "Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in the backend environment, then restart the API."
                 }
                 control={
@@ -64,8 +64,8 @@ export default async function SettingsPage() {
                 label="Authorisation"
                 description={
                   user?.has_github_token
-                    ? "DevPilot holds an authorised GitHub token for your account. It is encrypted at rest and used only to read repository contents."
-                    : "Sign in with GitHub to authorise DevPilot to read repository contents on your behalf."
+                    ? "DevPilot holds an authorised token for your account, encrypted at rest."
+                    : "Connect GitHub to let DevPilot read the repositories you choose."
                 }
                 control={
                   <SettingsStatus>
@@ -74,9 +74,41 @@ export default async function SettingsPage() {
                 }
               />
               <SettingsRow
-                label="Scopes"
-                description="DevPilot requests read access to your account and repositories. Write access is not requested in this milestone."
+                label="Access"
+                description="DevPilot reads repository contents. It writes only when you create a pull request from a change you approved: one new branch, one commit, one pull request."
                 control={<SettingsStatus>read:user, repo</SettingsStatus>}
+              />
+            </div>
+          </Panel>
+
+          <Panel>
+            <PanelHeader title="Search and answers" />
+            <div className="divide-line divide-y">
+              <SettingsRow
+                label="Code search"
+                description={
+                  embeddings?.configured
+                    ? "An embedding provider is configured, so indexed repositories can be searched by meaning."
+                    : "No embedding provider is configured. Indexing and search need one."
+                }
+                control={
+                  <SettingsStatus>
+                    {embeddings?.configured ? "Configured" : "Not configured"}
+                  </SettingsStatus>
+                }
+              />
+              <SettingsRow
+                label="Language model"
+                description={
+                  aiProvider?.configured
+                    ? "A language model is configured for answers and investigations."
+                    : "No language model is configured. Asking and investigating need one."
+                }
+                control={
+                  <SettingsStatus>
+                    {aiProvider?.configured ? "Configured" : "Not configured"}
+                  </SettingsStatus>
+                }
               />
             </div>
           </Panel>
@@ -86,38 +118,15 @@ export default async function SettingsPage() {
             <div className="divide-line divide-y">
               <SettingsRow
                 label="Secrets"
-                description="Credentials are read from the backend environment and are never sent to the browser or written to logs. The API reports only whether an integration is configured."
-                control={<SettingsStatus>Environment</SettingsStatus>}
+                description="Credentials stay in the backend environment. They are never sent to the browser or written to logs."
+                control={<SettingsStatus>Server only</SettingsStatus>}
               />
               <SettingsRow
-                label="AI provider"
-                description={
-                  aiProvider?.configured
-                    ? "An AI provider key is present. It is used only once retrieval and answering are implemented."
-                    : "No AI provider key is configured. Repository-grounded answers require one."
-                }
-                control={
-                  <SettingsStatus>
-                    {aiProvider?.configured ? "Configured" : "Not configured"}
-                  </SettingsStatus>
-                }
-              />
-              <SettingsRow
-                label="Repository access"
-                description="Indexing only reads. Repository content is treated as untrusted data: nothing from a repository is executed, installed, or built."
-                control={<SettingsStatus>Read only</SettingsStatus>}
+                label="Repository content"
+                description="Code is treated as untrusted data. Nothing from a repository is executed, installed or built."
+                control={<SettingsStatus>Read, never run</SettingsStatus>}
               />
             </div>
-          </Panel>
-
-          <Panel>
-            <PanelHeader title="Preferences" />
-            <EmptyState
-              align="start"
-              className="px-5 py-8"
-              title="No preferences to configure yet"
-              description="Preferences appear alongside the behaviour they control — retrieval depth, diff presentation, and how pull requests are named and described."
-            />
           </Panel>
         </div>
       </PageBody>

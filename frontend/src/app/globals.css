@@ -56,6 +56,33 @@
 
   --radius-md: 0.375rem;
   --radius-lg: 0.5rem;
+
+  /* Motion: short and small. It confirms that something changed; it never
+     performs. prefers-reduced-motion collapses all of it (see base layer). */
+  --animate-in: dp-enter 160ms cubic-bezier(0.2, 0, 0, 1) both;
+  --animate-panel: dp-panel 180ms cubic-bezier(0.2, 0, 0, 1) both;
+
+  @keyframes dp-enter {
+    from {
+      opacity: 0;
+      transform: translateY(3px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @keyframes dp-panel {
+    from {
+      opacity: 0;
+      transform: translateX(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
 }
 
 /* Dark is the default; the theme script writes data-theme on <html> before

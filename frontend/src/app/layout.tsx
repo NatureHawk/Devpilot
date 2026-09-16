@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 
-import { AppShell } from "@/components/layout/app-shell";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
 import "./globals.css";
@@ -8,7 +7,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: { default: "DevPilot", template: "%s · DevPilot" },
   description:
-    "DevPilot understands your repository, answers questions grounded in its code, and proposes reviewable changes.",
+    "DevPilot reads your repository, answers questions with the exact code behind each answer, and turns what you learn into reviewed pull requests.",
   applicationName: "DevPilot",
 };
 
@@ -19,6 +18,11 @@ export const viewport: Viewport = {
   ],
 };
 
+/**
+ * Document shell only. The application chrome (sidebar and main column) is
+ * rendered by the layouts below, because inside a repository the sidebar also
+ * carries that repository's workflow — which only its layout can load.
+ */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" data-theme="dark" suppressHydrationWarning>
@@ -26,9 +30,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Applies the stored theme before first paint. See lib/theme.ts. */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
-      <body className="antialiased">
-        <AppShell>{children}</AppShell>
-      </body>
+      <body className="antialiased">{children}</body>
     </html>
   );
 }

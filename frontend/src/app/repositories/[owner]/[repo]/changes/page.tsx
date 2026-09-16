@@ -1,62 +1,83 @@
-import { ChangesWorkspace } from "@/components/changes/changes-workspace";
+import { InvestigateWorkspace } from "@/components/changes/investigate-workspace";
 import { NotConnectedState } from "@/components/repository/repository-states";
 import { ApiErrorState } from "@/components/ui/error-state";
-import { getIntegrations, listChanges } from "@/lib/api";
-import { decodeParams, loadRepository, type RepositoryParams } from "@/lib/repository-context";
+import { getIntegrations } from "@/lib/api";
+import { repositoryPath } from "@/lib/navigation";
+import {
+  decodeParams,
+  loadChanges,
+  loadRepository,
+  type RepositoryParams,
+} from "@/lib/repository-context";
 
-/** Names the first thing standing between the user and a proposal. */
-function blockingReason(indexed: boolean, llmConfigured: boolean, embeddings: boolean) {
-  if (!indexed) return "Index this repository before requesting changes.";
-  if (!embeddings) return "No embedding provider is configured, so the code cannot be searched.";
-  if (!llmConfigured) return "No language model is configured for this deployment.";
-  return null;
-}
-
-export default async function ChangesPage({ params }: { params: Promise<RepositoryParams> }) {
+export default async function InvestigatePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<RepositoryParams>;
+  searchParams: Promise<{ request?: string | string[]; conversation?: string | string[] }>;
+}) {
   const { owner, repo } = decodeParams(await params);
+  const query = await searchParams;
   const result = await loadRepository(owner, repo);
 
   if (!result.ok) {
     return (
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-5xl px-6 py-8">
-          {result.error.code === "not_found" ? (
-            <NotConnectedState owner={owner} repo={repo} />
-          ) : (
-            <ApiErrorState error={result.error} />
-          )}
-        </div>
-      </div>
+      <Body>
+        {result.error.code === "not_found" ? (
+          <NotConnectedState owner={owner} repo={repo} />
+        ) : (
+          <ApiErrorState error={result.error} />
+        )}
+      </Body>
     );
   }
 
   const repository = result.data;
   const [changesResult, integrationsResult] = await Promise.all([
-    listChanges(repository.id),
+    loadChanges(repository.id),
     getIntegrations(),
   ]);
-
   const integrations = integrationsResult.ok ? integrationsResult.data.integrations : [];
   const configured = (name: string) =>
     integrations.find((integration) => integration.name === name)?.configured ?? false;
 
-  return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8">
-        {!changesResult.ok ? <ApiErrorState error={changesResult.error} className="mb-6" /> : null}
+  const blocked =
+    repository.indexing_status !== "indexed"
+      ? {
+          reason:
+            "DevPilot investigates the indexed code, so this repository needs indexing first.",
+          action: { label: "Index repository", href: repositoryPath(owner, repo) },
+        }
+      : !configured("embeddings") || !configured("ai_provider")
+        ? {
+            reason:
+              "A search provider and a language model must both be configured to investigate.",
+            action: { label: "Open settings", href: "/settings" },
+          }
+        : null;
 
-        <ChangesWorkspace
-          repositoryId={repository.id}
-          owner={owner}
-          name={repo}
-          initialChanges={changesResult.ok ? changesResult.data.items : []}
-          disabledReason={blockingReason(
-            repository.indexing_status === "indexed",
-            configured("ai_provider"),
-            configured("embeddings"),
-          )}
-        />
-      </div>
-    </div>
+  return (
+    <Body>
+      {!changesResult.ok ? <ApiErrorState error={changesResult.error} className="mb-6" /> : null}
+      <InvestigateWorkspace
+        repositoryId={repository.id}
+        owner={owner}
+        name={repo}
+        disabledReason={blocked?.reason ?? null}
+        blockedAction={blocked?.action ?? null}
+        initialRequest={typeof query.request === "string" ? query.request : ""}
+        conversationId={typeof query.conversation === "string" ? query.conversation : null}
+        recent={changesResult.ok ? changesResult.data.items : []}
+      />
+    </Body>
+  );
+}
+
+function Body({ children }: { children: React.ReactNode }) {
+  return (
+    <main className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-3xl px-6 py-8">{children}</div>
+    </main>
   );
 }

@@ -2,47 +2,52 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { SidebarNav } from "@/components/layout/sidebar-nav";
-import { PRIMARY_NAV } from "@/lib/navigation";
+import { FOOTER_NAV, PRIMARY_NAV } from "@/lib/navigation";
 
 const pathname = vi.hoisted(() => ({ current: "/" }));
 vi.mock("next/navigation", () => ({ usePathname: () => pathname.current }));
 
-describe("SidebarNav", () => {
-  it("renders every primary destination", () => {
-    pathname.current = "/";
-    render(<SidebarNav />);
+function renderBoth() {
+  return render(
+    <>
+      <SidebarNav set="primary" label="Primary" />
+      <SidebarNav set="footer" label="Account" />
+    </>,
+  );
+}
 
-    for (const item of PRIMARY_NAV) {
+describe("SidebarNav", () => {
+  it("renders every global destination", () => {
+    pathname.current = "/";
+    renderBoth();
+
+    for (const item of [...PRIMARY_NAV, ...FOOTER_NAV]) {
       expect(screen.getByRole("link", { name: item.label })).toHaveAttribute("href", item.href);
     }
   });
 
-  it("marks only the current section as the active page", () => {
+  it("treats the old repository list URL as the Repositories page", () => {
     pathname.current = "/repositories";
-    render(<SidebarNav />);
+    renderBoth();
 
     expect(screen.getByRole("link", { name: "Repositories" })).toHaveAttribute(
       "aria-current",
       "page",
     );
-    expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
   });
 
-  it("keeps Repositories active inside a repository workspace", () => {
+  it("does not claim the current page inside a repository, where the workflow step does", () => {
     pathname.current = "/repositories/acme/widgets/ask";
-    render(<SidebarNav />);
+    renderBoth();
 
-    expect(screen.getByRole("link", { name: "Repositories" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect(screen.getByRole("link", { name: "Repositories" })).not.toHaveAttribute("aria-current");
   });
 
-  it("does not treat every route as the dashboard", () => {
-    // "/" is a prefix of everything, so it needs an exact match.
+  it("marks settings only on the settings page", () => {
     pathname.current = "/settings";
-    render(<SidebarNav />);
+    renderBoth();
 
-    expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Repositories" })).not.toHaveAttribute("aria-current");
   });
 });

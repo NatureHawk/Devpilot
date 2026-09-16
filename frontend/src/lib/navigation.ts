@@ -1,31 +1,42 @@
-import { Activity, GitPullRequest, LayoutDashboard, type LucideIcon, Settings } from "lucide-react";
+import { FolderGit2, type LucideIcon, Settings } from "lucide-react";
 
 export type NavItem = {
   label: string;
   href: string;
   icon: LucideIcon;
+  /** Other exact paths that are this destination (e.g. the old list URL). */
+  aliases?: readonly string[];
 };
 
 export const PRIMARY_NAV: readonly NavItem[] = [
-  { label: "Dashboard", href: "/", icon: LayoutDashboard },
-  { label: "Repositories", href: "/repositories", icon: GitPullRequest },
-  { label: "Activity", href: "/activity", icon: Activity },
+  {
+    label: "Repositories",
+    href: "/",
+    icon: FolderGit2,
+    aliases: ["/repositories", "/repositories/connect"],
+  },
+] as const;
+
+export const FOOTER_NAV: readonly NavItem[] = [
   { label: "Settings", href: "/settings", icon: Settings },
 ] as const;
 
-export type WorkspaceTab = {
-  label: string;
-  /** Appended to the repository base path; "" is the overview. */
-  segment: string;
-};
+/**
+ * Exact matching on purpose: inside a repository the workflow step is the
+ * current page, and two links must never both claim `aria-current="page"`.
+ */
+export function isNavActive(pathname: string, item: NavItem): boolean {
+  return pathname === item.href || (item.aliases ?? []).includes(pathname);
+}
 
-export const WORKSPACE_TABS: readonly WorkspaceTab[] = [
-  { label: "Overview", segment: "" },
-  { label: "Code", segment: "code" },
-  { label: "Ask", segment: "ask" },
-  { label: "Changes", segment: "changes" },
-  { label: "Pull Requests", segment: "pull-requests" },
-] as const;
+/** Human names for repository route segments, in workflow terms. */
+export const SECTION_LABELS: Record<string, string> = {
+  "": "Overview",
+  ask: "Understand",
+  changes: "Investigate",
+  review: "Review",
+  "pull-requests": "Ship",
+};
 
 export function repositoryPath(owner: string, repo: string, segment = ""): string {
   const base = `/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;

@@ -13,7 +13,7 @@ import {
 import { Kbd } from "@/components/ui/kbd";
 import { cn } from "@/lib/cn";
 
-export type ComposerHandle = { setValue: (value: string) => void };
+export type ComposerHandle = { setValue: (value: string) => void; focus: () => void };
 
 const MAX_ROWS_HEIGHT = 200;
 
@@ -23,23 +23,27 @@ const clientModifier = () => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? "⌘
 const serverModifier = () => "Ctrl";
 
 /**
- * The question input.
+ * The question input. When asking is unavailable it stays typeable but cannot
+ * send, and says why.
  *
- * Sending is genuinely unavailable in this milestone, so the control is
- * disabled and says why. Typing, autosizing and the suggestion fill are real —
- * only the network call is missing, and nothing pretends otherwise.
+ * - inline: part of the page, below the guided starting points, before any
+ *   question has been asked. It is an option, not the whole screen.
+ * - docked: pinned under a conversation for follow-ups.
  */
 export function Composer({
   disabledReason,
   handleRef,
   onSubmit,
   busy = false,
+  placeholder = "Ask about this repository…",
+  variant = "docked",
 }: {
   disabledReason: string | null;
   handleRef?: Ref<ComposerHandle>;
-  /** Absent while answering is unavailable, which is what keeps send inert. */
   onSubmit?: (question: string) => void;
   busy?: boolean;
+  placeholder?: string;
+  variant?: "docked" | "inline";
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
@@ -50,6 +54,7 @@ export function Composer({
       setValue(next);
       textareaRef.current?.focus();
     },
+    focus: () => textareaRef.current?.focus(),
   }));
 
   // Grow with the content up to a cap, then scroll inside the field.
@@ -69,13 +74,12 @@ export function Composer({
   };
 
   return (
-    <div className="border-line bg-surface border-t py-3">
-      {/* Matches the conversation measure so the input lines up with the thread. */}
-      <div className="mx-auto w-full max-w-2xl px-6">
+    <div className={cn(variant === "docked" && "border-line bg-surface border-t py-3")}>
+      <div className={cn(variant === "docked" && "mx-auto w-full max-w-3xl px-6")}>
         <div
           className={cn(
             "border-line-strong bg-canvas rounded-lg border transition-colors",
-            "focus-within:border-accent",
+            "focus-within:border-accent focus-within:ring-accent/20 focus-within:ring-2",
           )}
         >
           <label htmlFor="devpilot-composer" className="sr-only">
@@ -84,41 +88,42 @@ export function Composer({
           <textarea
             id="devpilot-composer"
             ref={textareaRef}
-            rows={2}
+            rows={variant === "docked" ? 1 : 2}
             value={value}
             onChange={(event) => setValue(event.target.value)}
             onKeyDown={(event) => {
-              // Ctrl/Cmd+Enter sends; a bare Enter inserts a newline, because
+              // Ctrl/Cmd+Enter asks; a bare Enter inserts a newline, because
               // questions about code are often multi-line.
               if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                 event.preventDefault();
                 submit();
               }
             }}
-            placeholder="Ask about this repository…"
+            placeholder={placeholder}
             spellCheck={false}
+            aria-describedby={disabledReason ? "composer-availability" : undefined}
             className="text-ink placeholder:text-ink-faint block w-full resize-none bg-transparent px-3 py-2.5 text-sm focus:outline-none"
           />
           <div className="flex items-center gap-2 px-3 pb-2.5">
-            <span className="text-2xs text-ink-faint flex items-center gap-1">
+            <span className="text-2xs text-ink-faint hidden items-center gap-1 sm:flex">
               <Kbd suppressHydrationWarning>{modifier}</Kbd>
               <Kbd>↵</Kbd>
-              <span className="ml-0.5">to send</span>
+              <span className="ml-0.5">to ask</span>
             </span>
             <button
               type="button"
               onClick={submit}
               disabled={!canSend}
-              aria-label="Send question"
               aria-describedby={disabledReason ? "composer-availability" : undefined}
               className={cn(
-                "ml-auto inline-flex size-7 items-center justify-center rounded-md transition-colors",
+                "ml-auto inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors active:translate-y-px",
                 canSend
                   ? "bg-accent text-accent-ink hover:bg-accent-hover"
                   : "bg-surface-hover text-ink-faint cursor-not-allowed",
               )}
             >
               <ArrowUp aria-hidden="true" className="size-3.5" strokeWidth={2.25} />
+              {busy ? "Answering…" : "Ask"}
             </button>
           </div>
         </div>

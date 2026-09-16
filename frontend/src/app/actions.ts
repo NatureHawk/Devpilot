@@ -9,11 +9,13 @@ import {
   createChange,
   executeChange,
   getAuthorizeUrl,
+  getConversation,
   reviewChange,
   runIndex,
   searchRepository,
   SESSION_COOKIE,
   type ApiError,
+  type Conversation,
   type ProposedChange,
   type SearchResponse,
 } from "@/lib/api";
@@ -117,13 +119,14 @@ export async function indexRepositoryAction(
 }
 
 /**
- * Retrieval only — this action embeds the query and ranks stored vectors. No
- * language model is called, and nothing is written to the database.
+ * Retrieval only — semantic and keyword retrieval plus context selection, exactly
+ * as an answer would get them. No language model is called, and nothing is
+ * written to the database.
  */
 export async function searchRepositoryAction(
   repositoryId: string,
   query: string,
-  topK = 8,
+  topK?: number,
 ): Promise<ActionResult<SearchResponse>> {
   const trimmed = query.trim();
   if (!trimmed) {
@@ -149,6 +152,7 @@ export async function proposeChangeAction(
   owner: string,
   name: string,
   request: string,
+  conversationId?: string,
 ): Promise<ActionResult<ProposedChange>> {
   const trimmed = request.trim();
   if (!trimmed) {
@@ -158,10 +162,11 @@ export async function proposeChangeAction(
     };
   }
 
-  const result = await createChange(repositoryId, trimmed);
+  const result = await createChange(repositoryId, trimmed, conversationId);
   if (!result.ok) return failure(result.error);
 
-  revalidatePath(repositoryPath(owner, name, "changes"));
+  // Every workflow step changes what the sidebar shows as done and next.
+  revalidatePath(repositoryPath(owner, name), "layout");
   return { ok: true, data: result.data };
 }
 
@@ -175,7 +180,7 @@ export async function reviewChangeAction(
   const result = await reviewChange(changeId, decision);
   if (!result.ok) return failure(result.error);
 
-  revalidatePath(repositoryPath(owner, name, "changes"));
+  revalidatePath(repositoryPath(owner, name), "layout");
   return { ok: true, data: result.data };
 }
 
@@ -187,7 +192,24 @@ export async function executeChangeAction(
   const result = await executeChange(changeId);
   if (!result.ok) return failure(result.error);
 
-  revalidatePath(repositoryPath(owner, name, "changes"));
-  revalidatePath(repositoryPath(owner, name, "pull-requests"));
+  revalidatePath(repositoryPath(owner, name), "layout");
+  return { ok: true, data: result.data };
+}
+
+/**
+ * Refresh a repository's screens after work that happened outside a server
+ * action — an answer streamed through the route handler.
+ */
+export async function refreshRepositoryAction(owner: string, name: string): Promise<void> {
+  revalidatePath(repositoryPath(owner, name), "layout");
+}
+
+/** One past conversation, with its turns and the citations stored with them. */
+export async function loadConversationAction(
+  repositoryId: string,
+  conversationId: string,
+): Promise<ActionResult<Conversation>> {
+  const result = await getConversation(repositoryId, conversationId);
+  if (!result.ok) return failure(result.error);
   return { ok: true, data: result.data };
 }

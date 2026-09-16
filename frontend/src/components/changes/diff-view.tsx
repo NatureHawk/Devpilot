@@ -13,9 +13,7 @@ export function DiffView({ diff }: { diff: string }) {
   const files = splitByFile(diff);
 
   if (files.length === 0) {
-    return (
-      <p className="text-ink-muted px-4 py-6 text-sm">This proposal contains no changes.</p>
-    );
+    return <p className="text-ink-muted px-4 py-6 text-sm">This proposal contains no changes.</p>;
   }
 
   return (
@@ -114,7 +112,10 @@ function FileDiff({ file }: { file: DiffFile }) {
               ) : (
                 <tr
                   key={index}
-                  className={cn(row.kind === "add" && "bg-success/8", row.kind === "remove" && "bg-danger/8")}
+                  className={cn(
+                    row.kind === "add" && "bg-success/8",
+                    row.kind === "remove" && "bg-danger/8",
+                  )}
                 >
                   <td className="text-ink-faint border-line/50 w-12 border-r px-2 py-0.5 text-right align-top select-none">
                     {row.left ?? ""}
