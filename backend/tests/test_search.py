@@ -116,8 +116,9 @@ class TestSearchRequestValidation:
     def test_trims_surrounding_whitespace(self) -> None:
         assert SearchRequest(query="  auth  ").query == "auth"
 
-    def test_defaults_top_k_to_eight(self) -> None:
-        assert SearchRequest(query="auth").top_k == 8
+    def test_top_k_defaults_to_the_configured_source_cap(self) -> None:
+        """Unset means CONTEXT_MAX_SOURCES decides, not a hardcoded eight."""
+        assert SearchRequest(query="auth").top_k is None
 
     @pytest.mark.parametrize("top_k", [0, -1, 51, 5000])
     def test_rejects_out_of_range_top_k(self, top_k: int) -> None:
@@ -189,7 +190,7 @@ class TestSearchEndpoint:
             repositories_route.repository_repo, "get_by_id", lambda *a, **k: repository
         )
         monkeypatch.setattr(
-            "app.services.search.embedding_repo.count_embeddings", lambda *a, **k: 0
+            "app.services.retrieval.embedding_repo.count_embeddings", lambda *a, **k: 0
         )
 
         response = client.post(
@@ -215,7 +216,7 @@ class TestSearchEndpoint:
             repositories_route.repository_repo, "get_by_id", lambda *a, **k: repository
         )
         monkeypatch.setattr(
-            "app.services.search.embedding_repo.count_embeddings", lambda *a, **k: 12
+            "app.services.retrieval.embedding_repo.count_embeddings", lambda *a, **k: 12
         )
 
         response = client.post(

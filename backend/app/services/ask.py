@@ -31,7 +31,7 @@ from app.services.llm import (
 from app.services.llm import (
     get_provider as get_llm_provider,
 )
-from app.services.retrieval import RetrievalResult, retrieve
+from app.services.retrieval import RetrievalResult, RetrievalStrength, retrieve
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +71,16 @@ def ask(
     started = time.monotonic()
     llm = provider or get_llm_provider(settings)
 
-    retrieval = retrieve(
-        session,
-        repository=repository,
-        query=question,
-        top_k=settings.search_default_top_k,
-        settings=settings,
-    )
+    retrieval = retrieve(session, repository=repository, query=question, settings=settings)
 
     context = build_context(
         repository_full_name=f"{repository.owner}/{repository.name}",
         retrieval=retrieval,
-        max_chars=settings.context_max_chars,
+        max_chars=settings.effective_context_max_chars,
+        max_sources=settings.context_max_sources,
     )
+    # Evidence that did not survive selection is not evidence the model has.
+    strength = retrieval.strength if context.included else RetrievalStrength.NONE
 
     yield AskChunk(
         type="sources",
@@ -96,7 +93,7 @@ def ask(
         question=question,
         context=context,
         history=history,
-        evidence_note=prompts.evidence_guidance(retrieval.strength),
+        evidence_note=prompts.evidence_guidance(strength),
     )
 
     answer_parts: list[str] = []
@@ -124,6 +121,7 @@ def ask(
         answer=answer,
         context=context,
         retrieval=retrieval,
+        strength=strength,
         model=llm.model,
         latency_ms=latency_ms,
         input_tokens=input_tokens,
@@ -139,7 +137,7 @@ def ask(
         conversation.id,
         len(context.included),
         retrieval.distinct_files,
-        retrieval.strength.value,
+        strength.value,
         llm.model,
         latency_ms,
         len(answer),
@@ -181,6 +179,7 @@ def _persist_turn(
     answer: str,
     context: BuiltContext,
     retrieval: RetrievalResult,
+    strength: RetrievalStrength,
     model: str,
     latency_ms: int,
     input_tokens: int,
@@ -198,9 +197,13 @@ def _persist_turn(
         model=model,
         retrieval_metadata={
             "sources": len(context.included),
-            "distinct_files": retrieval.distinct_files,
-            "strength": retrieval.strength.value,
+            "distinct_files": len({source.file_path for source in context.included}),
+            "strength": strength.value,
             "searched_chunks": retrieval.searched_chunks,
+            "semantic_candidates": len(retrieval.semantic),
+            "lexical_candidates": len(retrieval.lexical),
+            "context_chars": context.source_chars,
+            "context_budget": context.budget,
             "embedding_model": retrieval.model,
             "latency_ms": latency_ms,
             "input_tokens": input_tokens,

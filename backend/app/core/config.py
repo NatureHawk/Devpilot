@@ -14,6 +14,15 @@ Environment = Literal["local", "test", "staging", "production"]
 # deployment cannot accidentally sign sessions with a published value.
 DEV_SECRET_KEY = "devpilot-insecure-development-key"
 
+# Retrieved-source character budget per LLM provider when CONTEXT_MAX_CHARS is
+# unset. Reasoning lives on Settings.effective_context_max_chars.
+_DEFAULT_CONTEXT_CHARS_BY_PROVIDER: dict[str, int] = {
+    "groq": 12_000,
+    "openrouter": 24_000,
+    "gemini": 40_000,
+    "anthropic": 40_000,
+}
+
 
 class Settings(BaseSettings):
     """Runtime configuration.
@@ -221,8 +230,15 @@ class Settings(BaseSettings):
     # ---- Context budget --------------------------------------------------
     # Ceiling on retrieved source sent to the model, in characters. Chosen as a
     # character budget rather than tokens because tokenising every chunk to make
-    # a packing decision costs more than the headroom it would buy.
-    context_max_chars: int = Field(default=60_000, ge=2_000, alias="CONTEXT_MAX_CHARS")
+    # a packing decision costs more than the headroom it would buy. Characters
+    # are only an approximation of tokens: source code averages roughly 3-4
+    # characters per token, so 12,000 characters is on the order of 3,000-4,000
+    # tokens. Unset means "the conservative default for the selected
+    # LLM_PROVIDER" — see effective_context_max_chars.
+    context_max_chars: int | None = Field(default=None, ge=2_000, alias="CONTEXT_MAX_CHARS")
+    # Most retrieved sources placed in one answer's context, however much
+    # budget remains. More sources past this point add noise faster than signal.
+    context_max_sources: int = Field(default=12, ge=1, le=50, alias="CONTEXT_MAX_SOURCES")
     # Recent turns replayed for follow-up questions. Bounded so a long thread
     # cannot crowd out the repository evidence, which is the point of the answer.
     conversation_history_turns: int = Field(
@@ -243,6 +259,15 @@ class Settings(BaseSettings):
     search_default_top_k: int = Field(default=8, ge=1, le=100, alias="SEARCH_DEFAULT_TOP_K")
     # Hard ceiling so a client cannot ask for thousands of rows of source.
     search_max_top_k: int = Field(default=50, ge=1, le=200, alias="SEARCH_MAX_TOP_K")
+    # Candidate pools considered before fusion and context selection. Larger
+    # than the final context on purpose: the best evidence for a question is
+    # often not the single nearest vector or the single best text match.
+    retrieval_semantic_candidates: int = Field(
+        default=40, ge=1, le=200, alias="RETRIEVAL_SEMANTIC_CANDIDATES"
+    )
+    retrieval_lexical_candidates: int = Field(
+        default=40, ge=0, le=200, alias="RETRIEVAL_LEXICAL_CANDIDATES"
+    )
 
     # ---- Indexing limits -------------------------------------------------
     # A file larger than this is recorded as skipped rather than downloaded.
@@ -286,6 +311,25 @@ class Settings(BaseSettings):
     @property
     def ai_provider_configured(self) -> bool:
         return self.llm_configured
+
+    @property
+    def effective_context_max_chars(self) -> int:
+        """The retrieved-source character budget actually used.
+
+        An explicit CONTEXT_MAX_CHARS always wins. Otherwise the default follows
+        the selected provider's practical limit, not its context window:
+
+        - groq: the free tier allows 8K tokens per minute for openai/gpt-oss-120b
+          (console.groq.com/docs/rate-limits, checked 2026-09-13), shared by the
+          system prompt, history, sources and answer. 12,000 characters of code
+          is roughly 3-4K tokens, leaving room for the rest.
+        - openrouter: free models vary widely in context and quota; 24,000.
+        - gemini / anthropic: very large windows, so the budget is about answer
+          focus and latency rather than capacity; 40,000.
+        """
+        if self.context_max_chars is not None:
+            return self.context_max_chars
+        return _DEFAULT_CONTEXT_CHARS_BY_PROVIDER.get(self.llm_provider, 24_000)
 
     @property
     def gemini_llm_key(self) -> str:

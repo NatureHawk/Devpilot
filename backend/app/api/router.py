@@ -13,5 +13,9 @@ from app.api.routes import ask, auth, meta, repositories
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
 api_router.include_router(meta.router)
-api_router.include_router(repositories.router)
+# Before repositories on purpose: its catch-all `GET /repositories/{owner}/{name}`
+# would otherwise capture `GET /repositories/{id}/conversations` and
+# `/{id}/changes`. Those routes only match a UUID id, so a repository that is
+# genuinely named "changes" still falls through to the repository lookup.
 api_router.include_router(ask.router)
+api_router.include_router(repositories.router)

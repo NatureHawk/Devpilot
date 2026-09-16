@@ -18,9 +18,10 @@ from app.repositories import index_repo, repository_repo
 from app.schemas.common import ListResponse
 from app.schemas.indexing import IndexRunResponse, IndexStatusResponse, LanguageCount
 from app.schemas.repository import RepositoryConnectRequest, RepositoryRead
-from app.schemas.search import SearchRequest, SearchResponse, SearchResult
+from app.schemas.search import CandidateResult, SearchRequest, SearchResponse, SearchResult
 from app.services import search as search_service
 from app.services.indexing.service import index_repository
+from app.services.retrieval import RetrievedSource
 
 router = APIRouter(prefix="/repositories", tags=["repositories"])
 
@@ -204,7 +205,7 @@ def get_repository(session: DbSession, owner: str, name: str) -> RepositoryRead:
 @router.post(
     "/{repository_id}/search",
     response_model=SearchResponse,
-    summary="Semantic search over a repository's indexed code",
+    summary="Hybrid retrieval over a repository's indexed code",
     responses={
         404: {"model": ErrorResponse, "description": "Repository is not connected"},
         409: {"model": ErrorResponse, "description": "Repository is not indexed or not searchable"},
@@ -218,7 +219,7 @@ def search_repository_route(
     repository_id: uuid.UUID,
     payload: SearchRequest,
 ) -> SearchResponse:
-    """Retrieve the chunks most similar to a question.
+    """Show what retrieval finds for a question and what an answer would receive.
 
     Retrieval only — no language model is involved in producing this response.
     """
@@ -228,12 +229,51 @@ def search_repository_route(
         session,
         repository=repository,
         query=payload.query,
-        top_k=payload.top_k,
         settings=settings,
+        max_sources=payload.top_k,
     )
+    retrieval, context = outcome.retrieval, outcome.context
 
     return SearchResponse(
-        results=[SearchResult.model_validate(hit) for hit in outcome.results],
-        model=outcome.model,
-        searched_chunks=outcome.query_chunk_count,
+        results=[
+            SearchResult.model_validate(
+                {**_candidate_fields(source), "content": source.content, "score": source.score}
+            )
+            for source in context.included
+        ],
+        semantic_candidates=[
+            CandidateResult.model_validate(_candidate_fields(s)) for s in retrieval.semantic
+        ],
+        lexical_candidates=[
+            CandidateResult.model_validate(_candidate_fields(s)) for s in retrieval.lexical
+        ],
+        strength=retrieval.strength.value,
+        model=retrieval.model,
+        searched_chunks=retrieval.searched_chunks,
+        query_terms=list(retrieval.query_terms),
+        lexical_available=retrieval.lexical_available,
+        context_chars=context.source_chars,
+        context_budget=context.budget,
+        max_sources=outcome.max_sources,
     )
+
+
+def _candidate_fields(source: RetrievedSource) -> dict[str, object]:
+    return {
+        "chunk_id": source.chunk_id,
+        "file_path": source.file_path,
+        "language": source.language,
+        "symbol": source.symbol,
+        "parent_symbol": source.parent_symbol,
+        "chunk_type": source.chunk_type,
+        "start_line": source.start_line,
+        "end_line": source.end_line,
+        "semantic_score": source.score,
+        "semantic_rank": source.semantic_rank,
+        "lexical_rank": source.lexical_rank,
+        "lexical_score": source.lexical_score,
+        "matched_terms": list(source.matched_terms),
+        "exact_match": source.exact_match,
+        "final_rank": source.rank or None,
+        "low_value": source.low_value,
+    }

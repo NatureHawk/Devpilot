@@ -49,6 +49,7 @@ from app.services.indexing.filters import (
 )
 from app.services.indexing.languages import Language
 from app.services.indexing.parser import ParsedFile, ParserUnavailableError, parse_file
+from app.services.lexical import chunk_lexical_fields
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +449,12 @@ def _persist_file(
 
     drafts = chunk_file(source_bytes, prepared.parsed, limits=limits)
     for draft in drafts:
+        lexical_names, lexical_body = chunk_lexical_fields(
+            file_path=prepared.path,
+            symbol=draft.symbol,
+            parent_symbol=draft.parent_symbol,
+            content=draft.content,
+        )
         session.add(
             CodeChunk(
                 file_id=source_file.id,
@@ -464,6 +471,8 @@ def _persist_file(
                 content=draft.content,
                 part_index=draft.part_index,
                 part_count=draft.part_count,
+                lexical_names=lexical_names,
+                lexical_body=lexical_body,
             )
         )
 

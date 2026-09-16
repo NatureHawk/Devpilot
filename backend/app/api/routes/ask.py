@@ -155,7 +155,7 @@ def _sse(payload: dict[str, object]) -> str:
 
 
 @router.get(
-    "/repositories/{repository_id}/conversations",
+    "/repositories/{repository_id:uuid}/conversations",
     response_model=ListResponse[ConversationRead],
     summary="List conversations for a repository",
 )
@@ -202,7 +202,7 @@ def get_conversation(
 
 
 @router.post(
-    "/repositories/{repository_id}/changes",
+    "/repositories/{repository_id:uuid}/changes",
     response_model=ChangeRead,
     status_code=status.HTTP_201_CREATED,
     summary="Investigate a change request and propose a patch",
@@ -238,7 +238,7 @@ def create_change(
 
 
 @router.get(
-    "/repositories/{repository_id}/changes",
+    "/repositories/{repository_id:uuid}/changes",
     response_model=ListResponse[ChangeRead],
     summary="List proposed changes",
 )

@@ -49,7 +49,10 @@ Write for a developer reading quickly.
   of what you are about to say.
 - Use short sections only when they earn their place — for example Overview,
   Flow, Relevant files.
-- Use the repository's own vocabulary for its symbols and paths."""
+- Use the repository's own vocabulary for its symbols and paths.
+- When the sources support a practical conclusion, end with a short section headed
+  "What this means" — one to three sentences on what the finding implies for the
+  user. Omit it when the evidence does not support a conclusion."""
 
 ASK_SYSTEM_PROMPT = f"""\
 You are DevPilot, answering questions about one specific software repository.
@@ -103,9 +106,11 @@ def evidence_guidance(strength: RetrievalStrength) -> str:
     """
     if strength is RetrievalStrength.NONE:
         return (
-            "No repository code matched this question. Say that the repository "
-            "evidence does not cover it, and suggest what the user could ask "
-            "instead. Do not guess at an answer."
+            "Retrieval found nothing that clearly matches this question; any "
+            "excerpts supplied are only the nearest code, not evidence of an "
+            "answer. Say that the repository evidence does not cover it, mention "
+            "only what those excerpts genuinely show if it is related, and "
+            "suggest what the user could ask instead. Do not guess at an answer."
         )
     if strength is RetrievalStrength.WEAK:
         return (

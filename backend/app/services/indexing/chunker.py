@@ -10,14 +10,46 @@ a file that carries content is covered exactly once.
 
 Fixed-size splitting is the last resort, used only for a single symbol that
 exceeds the limit on its own and for files with no parseable structure.
+
+Trivia between declarations
+---------------------------
+The regions between declarations ("gaps") often hold no code at all: a divider
+comment such as ``# --- PAGE 2: COMMERCIAL ---``, or the ``;`` that closes
+``const Page = () => {...};``. Stored on their own they become retrieval units
+whose embedded text is almost entirely the path/language header, which sits
+close to *every* question and outranks real code. So gap trivia is attached to
+the declaration it belongs to, by structure rather than by size:
+
+- a comment block directly above a declaration is part of that declaration
+  (it is the declaration's heading or documentation);
+- punctuation, and the rest of the line a declaration ends on, belongs to the
+  declaration before it.
+
+Only trivia moves. Code in a gap (imports, constants, setup) stays its own
+module chunk, two declarations are never merged into one chunk, a merge that
+would exceed the size limit is not made, and byte ranges stay contiguous, so
+source is neither duplicated nor dropped.
 """
 
 from __future__ import annotations
 
 import bisect
-from dataclasses import dataclass
+import enum
+from dataclasses import dataclass, replace
 
 from app.services.indexing.parser import ParsedFile, SymbolNode
+
+# Markers that start a comment line, per parseable language. A line beginning
+# with one of these (after indentation) carries no code of its own. `*` covers
+# the continuation lines of a /** ... */ block.
+_JS_COMMENT_PREFIXES = ("//", "/*", "*/", "*")
+_COMMENT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "python": ("#",),
+    "javascript": _JS_COMMENT_PREFIXES,
+    "jsx": _JS_COMMENT_PREFIXES,
+    "typescript": _JS_COMMENT_PREFIXES,
+    "tsx": _JS_COMMENT_PREFIXES,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +81,22 @@ class _SymbolTreeNode:
     children: list[_SymbolTreeNode]
 
 
+@dataclass(frozen=True, slots=True)
+class _Gap:
+    """A region no symbol claims, resolved once its neighbours are known."""
+
+    start_byte: int
+    end_byte: int
+    parent_symbol: str | None
+
+
+class _LineKind(enum.Enum):
+    BLANK = "blank"
+    COMMENT = "comment"
+    PUNCTUATION = "punctuation"
+    CODE = "code"
+
+
 def chunk_file(
     source: bytes,
     parsed: ParsedFile | None,
@@ -70,19 +118,38 @@ def chunk_file(
 
     roots = _build_symbol_tree(parsed.symbols)
 
-    drafts: list[ChunkDraft] = []
+    # Symbols and gaps in source order. Gaps are resolved afterwards, because
+    # where a gap's trivia belongs depends on the chunks either side of it.
+    items: list[ChunkDraft | _Gap] = []
     cursor = 0
     for root in roots:
         # Content between the previous symbol and this one: imports, constants,
-        # module docstrings. Real code, so it is chunked rather than dropped.
-        _emit_gap(source, line_starts, cursor, root.symbol.start_byte, limits, drafts)
-        _emit_symbol(source, line_starts, root, limits, drafts)
+        # module docstrings, divider comments.
+        _add_gap(items, cursor, root.symbol.start_byte, parent_symbol=None)
+        _emit_symbol(source, line_starts, root, limits, items)
         cursor = max(cursor, root.symbol.end_byte)
 
-    _emit_gap(source, line_starts, cursor, len(source), limits, drafts)
+    _add_gap(items, cursor, len(source), parent_symbol=None)
 
+    drafts = _resolve_gaps(
+        source,
+        line_starts,
+        items,
+        limits,
+        comment_prefixes=_COMMENT_PREFIXES.get(parsed.language, ()),
+    )
     drafts.sort(key=lambda draft: (draft.start_byte, draft.part_index))
     return drafts
+
+
+def is_trivia_only(text: str, language: str) -> bool:
+    """Whether ``text`` holds only comments, punctuation and whitespace.
+
+    Used by retrieval to recognise low-value chunks in an index built before
+    trivia was attached to declarations.
+    """
+    prefixes = _COMMENT_PREFIXES.get(language, ())
+    return all(_classify(line, prefixes) is not _LineKind.CODE for line in text.splitlines())
 
 
 # ---- symbol tree ----------------------------------------------------------
@@ -112,12 +179,19 @@ def _build_symbol_tree(symbols: list[SymbolNode]) -> list[_SymbolTreeNode]:
 # ---- emission -------------------------------------------------------------
 
 
+def _add_gap(
+    items: list[ChunkDraft | _Gap], start: int, end: int, *, parent_symbol: str | None
+) -> None:
+    if end > start:
+        items.append(_Gap(start_byte=start, end_byte=end, parent_symbol=parent_symbol))
+
+
 def _emit_symbol(
     source: bytes,
     line_starts: list[int],
     node: _SymbolTreeNode,
     limits: ChunkingLimits,
-    out: list[ChunkDraft],
+    out: list[ChunkDraft | _Gap],
 ) -> None:
     symbol = node.symbol
     text = _slice_text(source, symbol.start_byte, symbol.end_byte)
@@ -151,19 +225,11 @@ def _emit_symbol(
     # body as separate blocks. The parent is never duplicated into its children.
     cursor = symbol.start_byte
     for child in node.children:
-        _emit_gap(
-            source,
-            line_starts,
-            cursor,
-            child.symbol.start_byte,
-            limits,
-            out,
-            parent_symbol=symbol.name,
-        )
+        _add_gap(out, cursor, child.symbol.start_byte, parent_symbol=symbol.name)
         _emit_symbol(source, line_starts, child, limits, out)
         cursor = max(cursor, child.symbol.end_byte)
 
-    _emit_gap(source, line_starts, cursor, symbol.end_byte, limits, out, parent_symbol=symbol.name)
+    _add_gap(out, cursor, symbol.end_byte, parent_symbol=symbol.name)
 
 
 def _emit_split_symbol(
@@ -171,7 +237,7 @@ def _emit_split_symbol(
     line_starts: list[int],
     symbol: SymbolNode,
     limits: ChunkingLimits,
-    out: list[ChunkDraft],
+    out: list[ChunkDraft | _Gap],
 ) -> None:
     """Split one oversized symbol into line-aligned parts."""
     windows = _line_windows(source, line_starts, symbol.start_byte, symbol.end_byte, limits)
@@ -198,7 +264,141 @@ def _emit_split_symbol(
         )
 
 
-def _emit_gap(
+# ---- gap resolution -------------------------------------------------------
+
+
+def _resolve_gaps(
+    source: bytes,
+    line_starts: list[int],
+    items: list[ChunkDraft | _Gap],
+    limits: ChunkingLimits,
+    *,
+    comment_prefixes: tuple[str, ...],
+) -> list[ChunkDraft]:
+    """Attach gap trivia to neighbouring declarations; chunk what remains.
+
+    Walks items in source order. A neighbour only counts when it is directly
+    adjacent (its byte range touches the gap), which keeps attachment inside one
+    scope: a gap in a class body can only reach that class's own members.
+    """
+    resolved: list[ChunkDraft] = []
+
+    for index, item in enumerate(items):
+        if isinstance(item, ChunkDraft):
+            resolved.append(item)
+            continue
+
+        gap = item
+        lead_end, trail_start = _split_gap(source, line_starts, gap, comment_prefixes)
+        middle_start, middle_end = gap.start_byte, gap.end_byte
+
+        previous = resolved[-1] if resolved and resolved[-1].end_byte == gap.start_byte else None
+        following_item = items[index + 1] if index + 1 < len(items) else None
+        following = (
+            following_item
+            if isinstance(following_item, ChunkDraft)
+            and following_item.start_byte == gap.end_byte
+            # A continuation part is the middle of a symbol, not its heading.
+            and following_item.part_index == 1
+            else None
+        )
+
+        # Trailing punctuation and the rest of the previous line -> previous.
+        if previous is not None and lead_end > gap.start_byte:
+            extended = _extend(source, line_starts, previous, end=lead_end)
+            if len(extended.content) <= limits.max_chunk_chars:
+                resolved[-1] = previous = extended
+                middle_start = lead_end
+
+        # Comment block introducing the next declaration -> that declaration.
+        if trail_start < gap.end_byte:
+            attached = False
+            if following is not None:
+                extended = _extend(source, line_starts, following, start=trail_start)
+                if len(extended.content) <= limits.max_chunk_chars:
+                    items[index + 1] = extended
+                    middle_end = trail_start
+                    attached = True
+
+            # Nothing follows to introduce (end of file or scope): a comment-only
+            # remainder is still trivia, so it closes the previous declaration
+            # rather than standing alone.
+            if (
+                not attached
+                and previous is not None
+                and previous.end_byte == middle_start
+                and not _has_content(_slice_text(source, middle_start, trail_start))
+            ):
+                extended = _extend(source, line_starts, previous, end=gap.end_byte)
+                if len(extended.content) <= limits.max_chunk_chars:
+                    resolved[-1] = extended
+                    middle_start = middle_end = gap.end_byte
+
+        _emit_gap_chunks(
+            source,
+            line_starts,
+            middle_start,
+            middle_end,
+            limits,
+            resolved,
+            parent_symbol=gap.parent_symbol,
+        )
+
+    return resolved
+
+
+def _split_gap(
+    source: bytes,
+    line_starts: list[int],
+    gap: _Gap,
+    comment_prefixes: tuple[str, ...],
+) -> tuple[int, int]:
+    """Find the trivia at each end of a gap.
+
+    Returns ``(lead_end, trail_start)``:
+
+    - ``[gap.start, lead_end)`` is trailing trivia of the preceding code: the
+      rest of the line a declaration ended on, then punctuation-only lines.
+      Blank lines extend the scan but are never claimed on their own.
+    - ``[trail_start, gap.end)`` is the comment block directly above the next
+      declaration, including blank lines between it and the declaration.
+
+    ``lead_end == gap.start`` / ``trail_start == gap.end`` mean "none".
+    """
+    segments = _line_segments(source, line_starts, gap.start_byte, gap.end_byte)
+    starts_mid_line = gap.start_byte != _line_start_before(line_starts, gap.start_byte)
+
+    lead_end = gap.start_byte
+    for position, (start, end) in enumerate(segments):
+        kind = _classify(_slice_text(source, start, end), comment_prefixes)
+        if position == 0 and starts_mid_line:
+            if kind is _LineKind.CODE:
+                break
+            if kind is not _LineKind.BLANK:
+                lead_end = end
+            continue
+        if kind is _LineKind.PUNCTUATION:
+            lead_end = end
+        elif kind is not _LineKind.BLANK:
+            break
+
+    trail_start = gap.end_byte
+    for position in range(len(segments) - 1, -1, -1):
+        if position == 0 and starts_mid_line:
+            break
+        start, end = segments[position]
+        if start < lead_end:
+            break
+        kind = _classify(_slice_text(source, start, end), comment_prefixes)
+        if kind is _LineKind.COMMENT:
+            trail_start = start
+        elif kind is not _LineKind.BLANK:
+            break
+
+    return lead_end, trail_start
+
+
+def _emit_gap_chunks(
     source: bytes,
     line_starts: list[int],
     start: int,
@@ -206,9 +406,9 @@ def _emit_gap(
     limits: ChunkingLimits,
     out: list[ChunkDraft],
     *,
-    parent_symbol: str | None = None,
+    parent_symbol: str | None,
 ) -> None:
-    """Chunk a region that no symbol claims.
+    """Chunk what is left of a gap after trivia has been attached.
 
     At the top level this is module-level code; inside a symbol it is the
     parent's own body around its children.
@@ -234,6 +434,27 @@ def _emit_gap(
                 content=text,
             )
         )
+
+
+def _extend(
+    source: bytes,
+    line_starts: list[int],
+    draft: ChunkDraft,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+) -> ChunkDraft:
+    """Widen a draft's byte range, re-deriving content and lines from source."""
+    new_start = draft.start_byte if start is None else start
+    new_end = draft.end_byte if end is None else end
+    return replace(
+        draft,
+        start_byte=new_start,
+        end_byte=new_end,
+        start_line=_line_at(line_starts, new_start),
+        end_line=_line_at(line_starts, max(new_start, new_end - 1)),
+        content=_slice_text(source, new_start, new_end),
+    )
 
 
 def _fallback_chunks(
@@ -268,6 +489,17 @@ def _fallback_chunks(
 # ---- byte/line helpers ----------------------------------------------------
 
 
+def _classify(line: str, comment_prefixes: tuple[str, ...]) -> _LineKind:
+    stripped = line.strip()
+    if not stripped:
+        return _LineKind.BLANK
+    if comment_prefixes and stripped.startswith(comment_prefixes):
+        return _LineKind.COMMENT
+    if not any(character.isalnum() for character in stripped):
+        return _LineKind.PUNCTUATION
+    return _LineKind.CODE
+
+
 def _has_content(text: str) -> bool:
     """Whether a region is worth storing as its own chunk.
 
@@ -282,6 +514,27 @@ def _line_start_offsets(source: bytes) -> list[int]:
     offsets = [0]
     offsets.extend(index + 1 for index, byte in enumerate(source) if byte == 0x0A)
     return offsets
+
+
+def _line_start_before(line_starts: list[int], offset: int) -> int:
+    """Byte offset of the start of the line containing ``offset``."""
+    return line_starts[bisect.bisect_right(line_starts, offset) - 1]
+
+
+def _line_segments(
+    source: bytes, line_starts: list[int], start: int, end: int
+) -> list[tuple[int, int]]:
+    """Split ``[start, end)`` into per-line byte ranges (first may start mid-line)."""
+    segments: list[tuple[int, int]] = []
+    cursor = start
+    index = bisect.bisect_right(line_starts, start)
+    while cursor < end:
+        line_end = line_starts[index] if index < len(line_starts) else len(source)
+        segment_end = min(line_end, end)
+        segments.append((cursor, segment_end))
+        cursor = segment_end
+        index += 1
+    return segments
 
 
 def _line_at(line_starts: list[int], byte_offset: int) -> int:

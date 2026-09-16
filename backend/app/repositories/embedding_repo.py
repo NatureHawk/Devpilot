@@ -93,6 +93,28 @@ def count_embeddings(
     return session.scalar(stmt) or 0
 
 
+def similarity_for_chunks(
+    session: Session,
+    *,
+    chunk_ids: Sequence[uuid.UUID],
+    query_vector: Sequence[float],
+    model: str,
+) -> dict[uuid.UUID, float]:
+    """Cosine similarity of specific chunks to ``query_vector``.
+
+    For candidates found lexically but outside the semantic pool, so every
+    candidate carries its real semantic score rather than a placeholder.
+    """
+    if not chunk_ids:
+        return {}
+    distance = ChunkEmbedding.embedding.cosine_distance(query_vector)
+    stmt = select(ChunkEmbedding.chunk_id, distance.label("distance")).where(
+        ChunkEmbedding.chunk_id.in_(list(chunk_ids)),
+        ChunkEmbedding.model == model,
+    )
+    return {row.chunk_id: 1.0 - float(row.distance) for row in session.execute(stmt)}
+
+
 def search_similar_chunks(
     session: Session,
     *,
