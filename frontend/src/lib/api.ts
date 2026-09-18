@@ -327,6 +327,54 @@ export type ExecutionEvent = {
   at: string;
 };
 
+export type InvestigationOutcome =
+  "change_proposed" | "insufficient_evidence" | "unsupported_request";
+
+/** Qualitative: how directly the evidence supports the conclusion. Never a probability. */
+export type InvestigationConfidence = "high" | "medium" | "low";
+
+/** A cited piece of repository evidence. Locations only — never source text. */
+export type EvidenceCitation = {
+  id: string;
+  path: string;
+  start_line: number;
+  end_line: number;
+  symbol: string | null;
+  origin: string;
+  claim?: string;
+};
+
+/** The grounded investigation result behind a proposal. Empty for older proposals. */
+export type InvestigationReport = {
+  outcome: InvestigationOutcome;
+  summary: string;
+  root_cause: string;
+  confidence: InvestigationConfidence;
+  expected_behavior: string;
+  missing_information: string;
+  downgraded_reason: string | null;
+  relevant_files: { path: string; reason: string }[];
+  evidence: EvidenceCitation[];
+  sources_consulted: EvidenceCitation[];
+  proposed_changes: { path: string; start_line: number; end_line: number; reason: string }[];
+  files: { path: string; blob_sha: string; additions: number; deletions: number }[];
+  validation: {
+    anchors_matched_exactly_once: number;
+    diff_verified: boolean;
+    snapshot_commit_sha: string | null;
+    unresolved_citations: number;
+  };
+  investigation: {
+    steps: number;
+    tool_calls: number;
+    tools_used: Record<string, number>;
+    hit_tool_limit: boolean;
+    repair_attempts: number;
+    seed_sources: number;
+    files_read: string[];
+  };
+};
+
 export type ProposedChange = {
   id: string;
   repository_id: string;
@@ -341,6 +389,7 @@ export type ProposedChange = {
   model: string | null;
   error: string | null;
   investigation: ToolActivity[];
+  report?: Partial<InvestigationReport>;
   created_at: string;
   reviewed_at: string | null;
   branch_name: string | null;

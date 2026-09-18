@@ -66,7 +66,11 @@ export function ChangeCard({
   const [error, setError] = useState<string | null>(null);
 
   const files = summarizeDiff(change.diff);
+  const report = change.report ?? {};
+  const locations = report.proposed_changes ?? [];
+  const evidence = report.evidence ?? [];
   const headingId = `change-${change.id}-title`;
+  const diffId = `change-${change.id}-diff`;
   const reached = new Set(change.execution_events.map((event) => event.event));
   const showExecution =
     change.status === "executing" ||
@@ -133,11 +137,49 @@ export function ChangeCard({
       {change.summary ? (
         <Section title="What DevPilot found">
           <p className="text-ink-muted max-w-[68ch] text-sm leading-relaxed">{change.summary}</p>
+          {report.root_cause ? (
+            <p className="text-ink-muted mt-2 max-w-[68ch] text-sm leading-relaxed">
+              <span className="text-ink font-medium">Root cause: </span>
+              {report.root_cause}
+            </p>
+          ) : null}
+          {report.expected_behavior ? (
+            <p className="text-ink-muted mt-2 max-w-[68ch] text-sm leading-relaxed">
+              <span className="text-ink font-medium">After the change: </span>
+              {report.expected_behavior}
+            </p>
+          ) : null}
+          {report.missing_information ? (
+            <p className="text-ink-muted mt-2 max-w-[68ch] text-sm leading-relaxed">
+              <span className="text-ink font-medium">Missing: </span>
+              {report.missing_information}
+            </p>
+          ) : null}
+          {report.confidence ? (
+            <p className="text-ink-faint mt-2 text-xs">
+              Evidence supports this with {report.confidence} confidence.
+            </p>
+          ) : null}
+        </Section>
+      ) : null}
+
+      {evidence.length > 0 ? (
+        <Section title="Evidence">
+          <ul className="space-y-1.5">
+            {evidence.map((item) => (
+              <li key={`${item.id}-${item.claim}`} className="text-sm">
+                <span className="text-ink font-mono text-xs">
+                  {item.id} · {item.path}:{item.start_line}–{item.end_line}
+                </span>
+                {item.claim ? <span className="text-ink-muted"> — {item.claim}</span> : null}
+              </li>
+            ))}
+          </ul>
         </Section>
       ) : null}
 
       {files.length > 0 ? (
-        <Section title="Files affected">
+        <Section title={`Proposed change · ${files.length} file${files.length === 1 ? "" : "s"}`}>
           <ul className="space-y-1">
             {files.map((file) => (
               <li key={file.path} className="flex items-center gap-3 text-sm">
@@ -151,13 +193,37 @@ export function ChangeCard({
               </li>
             ))}
           </ul>
+          {locations.length > 0 ? (
+            <ul className="mt-2 space-y-1">
+              {locations.map((location) => (
+                <li
+                  key={`${location.path}:${location.start_line}`}
+                  className="text-ink-muted text-xs"
+                >
+                  <span className="font-mono">
+                    {location.path}:{location.start_line}
+                    {location.end_line !== location.start_line ? `–${location.end_line}` : ""}
+                  </span>
+                  {location.reason ? ` — ${location.reason}` : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {change.status === "proposed" && change.diff ? (
+            <a
+              href={`#${diffId}`}
+              className="text-accent mt-2 inline-flex text-xs font-medium hover:underline"
+            >
+              Review diff →
+            </a>
+          ) : null}
         </Section>
       ) : null}
 
       {change.status === "stale" ? (
         <Notice tone="warning" title="This proposal is out of date">
-          The repository was re-indexed after this diff was produced, so it may no longer match the
-          code. Investigate the change again.
+          The repository changed after this diff was produced, so it may no longer match the code.
+          Refresh the investigation to propose it again.
         </Notice>
       ) : null}
 
@@ -195,7 +261,11 @@ export function ChangeCard({
       ) : null}
 
       {change.diff ? (
-        <details className="group border-line border-t" open={change.status === "proposed"}>
+        <details
+          id={diffId}
+          className="group border-line scroll-mt-6 border-t"
+          open={change.status === "proposed"}
+        >
           <summary className="text-ink hover:bg-surface-hover flex cursor-pointer list-none items-center gap-1.5 px-5 py-2.5 text-sm font-medium transition-colors">
             <ChevronRight
               aria-hidden="true"
@@ -344,11 +414,15 @@ function Decision({
       );
 
     case "executing":
+      // Offering the action rather than only a spinner: if the process handling
+      // this died, the row stays "executing" and a disabled button would strand
+      // the change forever. The backend is the authority — it refuses while one
+      // is genuinely in flight, and reclaims an abandoned one.
       return (
-        <Row helper="GitHub is creating the branch, commit and pull request.">
-          <Button variant="primary" disabled>
+        <Row helper="GitHub is creating the branch, commit and pull request. If this looks stuck, try again.">
+          <Button variant="primary" onClick={onExecute} disabled={busy}>
             <Loader2 aria-hidden="true" className="size-3.5 animate-spin" strokeWidth={2} />
-            Creating pull request…
+            {pending === "execute" ? "Checking…" : "Creating pull request…"}
           </Button>
         </Row>
       );

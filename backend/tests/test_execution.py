@@ -112,13 +112,42 @@ class TestSecretScan:
 # ---- GitHub client: the write path ------------------------------------------
 
 
-def _write_path_handler() -> Callable[[httpx.Request], httpx.Response]:
+def _pr_payload(head: str, base: str = "main", number: int = 42) -> dict[str, object]:
+    return {
+        "id": 999,
+        "number": number,
+        "html_url": f"https://github.com/acme/widgets/pull/{number}",
+        "state": "open",
+        "head": {"ref": head},
+        "base": {"ref": base},
+    }
+
+
+def _write_path_handler(
+    *, head_sha: str = "base123", live_blob: str = "s"
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A fake GitHub. ``head_sha`` is the live default-branch head; ``live_blob``
+    the blob sha every file has at that head."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         body = json.loads(request.content or b"{}")
 
+        if request.method == "GET" and path.endswith("/commits/main"):
+            return httpx.Response(200, json={"sha": head_sha})
+        if request.method == "GET" and "/contents/" in path:
+            return httpx.Response(200, json={"type": "file", "sha": live_blob})
+        if request.method == "GET" and "/git/ref/heads/" in path:
+            return httpx.Response(404, json={"message": "Not Found"})
         if request.method == "GET" and "/git/commits/" in path:
-            return httpx.Response(200, json={"sha": "base123", "tree": {"sha": "tree_base"}})
+            return httpx.Response(
+                200,
+                json={
+                    "sha": path.rsplit("/", 1)[-1],
+                    "tree": {"sha": "tree_base"},
+                    "parents": [{"sha": "base123"}],
+                },
+            )
         if request.method == "POST" and path.endswith("/git/blobs"):
             return httpx.Response(201, json={"sha": f"blob_{body['content'][:6]}"})
         if request.method == "POST" and path.endswith("/git/trees"):
@@ -161,9 +190,7 @@ class TestGitHubWritePath:
         assert write_client.create_blob("acme", "widgets", "hello") == "blob_hello"
 
     def test_create_tree_uses_the_base_tree(self, write_client: GitHubClient) -> None:
-        sha = write_client.create_tree(
-            "acme", "widgets", base_tree_sha="tree_base", entries=[]
-        )
+        sha = write_client.create_tree("acme", "widgets", base_tree_sha="tree_base", entries=[])
         assert sha == "tree_new"
 
     def test_create_commit_returns_a_sha(self, write_client: GitHubClient) -> None:
@@ -183,7 +210,11 @@ class TestGitHubWritePath:
 
     def test_create_pull_request_returns_the_pr(self, write_client: GitHubClient) -> None:
         pr = write_client.create_pull_request(
-            "acme", "widgets", title="Add validation", body="body", head="devpilot/change/abc",
+            "acme",
+            "widgets",
+            title="Add validation",
+            body="body",
+            head="devpilot/change/abc",
             base="main",
         )
         assert pr.number == 42
@@ -297,6 +328,7 @@ def _approved_change(db: Session, repository: Repository, **overrides: object) -
         ],
         "diff": "--- a/app.py\n+++ b/app.py\n@@\n-    return 1\n+    return 2",
         "files_changed": 1,
+        "report": {"files": [{"path": "app.py", "blob_sha": "s"}]},
     }
     defaults.update(overrides)
     change = ProposedChange(**defaults)
@@ -501,3 +533,229 @@ class TestExecutionStateMachine:
 
         resumed = change_repo.claim_for_execution(db, change.id)
         assert resumed == ChangeStatus.APPROVED
+
+
+# ---- stale protection and crash recovery -------------------------------------
+
+
+def _recording(
+    base: Callable[[httpx.Request], httpx.Response], writes: list[str]
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET":
+            writes.append(f"{request.method} {request.url.path}")
+        return base(request)
+
+    return handler
+
+
+class TestStaleProtection:
+    def test_moved_branch_with_unchanged_files_builds_on_the_live_head(
+        self, db: Session, repository: Repository
+    ) -> None:
+        parents: list[list[str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST" and request.url.path.endswith("/git/commits"):
+                parents.append(json.loads(request.content)["parents"])
+            return _write_path_handler(head_sha="head999", live_blob="s")(request)
+
+        change = _approved_change(db, repository)
+        client = GitHubClient(token="t", transport=httpx.MockTransport(handler))
+        result = execute_change(db, proposal=change, repository=repository, client=client)
+
+        assert result.status == ChangeStatus.PR_CREATED
+        assert parents == [["head999"]]
+
+    def test_file_changed_on_github_is_stale_and_nothing_is_written(
+        self, db: Session, repository: Repository
+    ) -> None:
+        writes: list[str] = []
+        handler = _recording(_write_path_handler(head_sha="head999", live_blob="other"), writes)
+
+        change = _approved_change(db, repository)
+        client = GitHubClient(token="t", transport=httpx.MockTransport(handler))
+        result = execute_change(db, proposal=change, repository=repository, client=client)
+
+        assert result.status == ChangeStatus.STALE
+        assert writes == []
+        assert "refresh the investigation" in (result.execution_error or "").lower()
+
+    def test_reindexed_file_content_is_stale_even_with_the_same_commit_sha(
+        self, db: Session, repository: Repository
+    ) -> None:
+        from sqlalchemy import update
+
+        db.execute(
+            update(SourceFile)
+            .where(SourceFile.repository_id == repository.id)
+            .values(blob_sha="changed", content="def handler():\n    return 5\n")
+        )
+        db.commit()
+        writes: list[str] = []
+        change = _approved_change(db, repository)
+        client = GitHubClient(
+            token="t", transport=httpx.MockTransport(_recording(_write_path_handler(), writes))
+        )
+
+        result = execute_change(db, proposal=change, repository=repository, client=client)
+
+        assert result.status == ChangeStatus.STALE
+        assert writes == []
+
+    def test_anchor_no_longer_unique_is_stale(self, db: Session, repository: Repository) -> None:
+        from sqlalchemy import update
+
+        db.execute(
+            update(SourceFile)
+            .where(SourceFile.repository_id == repository.id)
+            .values(content="def handler():\n    return 1\n    return 1\n")
+        )
+        db.commit()
+        change = _approved_change(db, repository)
+        client = GitHubClient(token="t", transport=httpx.MockTransport(_write_path_handler()))
+
+        result = execute_change(db, proposal=change, repository=repository, client=client)
+
+        assert result.status == ChangeStatus.STALE
+        assert result.commit_sha is None
+
+
+def _existing_branch_handler(
+    commit: str, tree: str, writes: list[str]
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and "/git/ref/heads/" in path:
+            branch = path.split("/git/ref/heads/", 1)[1]
+            return httpx.Response(
+                200, json={"ref": f"refs/heads/{branch}", "object": {"sha": commit}}
+            )
+        if request.method == "GET" and path.endswith(f"/git/commits/{commit}"):
+            return httpx.Response(200, json={"tree": {"sha": tree}, "parents": []})
+        return _write_path_handler()(request)
+
+    return _recording(handler, writes)
+
+
+class TestRecovery:
+    def test_branch_left_by_an_interrupted_attempt_is_adopted_not_duplicated(
+        self, db: Session, repository: Repository
+    ) -> None:
+        writes: list[str] = []
+        handler = _existing_branch_handler("commit_old", "tree_new", writes)
+
+        change = _approved_change(db, repository)
+        client = GitHubClient(token="t", transport=httpx.MockTransport(handler))
+        result = execute_change(db, proposal=change, repository=repository, client=client)
+
+        assert result.status == ChangeStatus.PR_CREATED
+        assert result.commit_sha == "commit_old"
+        assert not any(w.endswith(("/git/commits", "/git/refs")) for w in writes)
+
+    def test_existing_branch_with_different_content_is_never_overwritten(
+        self, db: Session, repository: Repository
+    ) -> None:
+        writes: list[str] = []
+        handler = _existing_branch_handler("someone_else", "tree_other", writes)
+
+        change = _approved_change(db, repository)
+        client = GitHubClient(token="t", transport=httpx.MockTransport(handler))
+        result = execute_change(db, proposal=change, repository=repository, client=client)
+
+        assert result.status == ChangeStatus.FAILED
+        assert "already exists" in (result.execution_error or "")
+        assert not any(w.endswith(("/git/refs", "/pulls")) for w in writes)
+
+    def test_pull_request_created_by_an_interrupted_attempt_is_adopted(
+        self, db: Session, repository: Repository
+    ) -> None:
+        pr_posts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal pr_posts
+            path = request.url.path
+            if request.method == "POST" and path.endswith("/pulls"):
+                pr_posts += 1
+                return httpx.Response(422, json={"message": "A pull request already exists"})
+            if request.method == "GET" and path.endswith("/pulls"):
+                assert request.url.params["head"] == "acme:devpilot/change/abc123"
+                return httpx.Response(200, json=[_pr_payload("devpilot/change/abc123", number=7)])
+            return _write_path_handler()(request)
+
+        change = _approved_change(
+            db,
+            repository,
+            status=ChangeStatus.COMMITTED,
+            branch_name="devpilot/change/abc123",
+            commit_sha="commit_new",
+        )
+        client = GitHubClient(token="t", transport=httpx.MockTransport(handler))
+        result = execute_change(db, proposal=change, repository=repository, client=client)
+
+        assert result.status == ChangeStatus.PR_CREATED
+        assert result.pr_number == 7
+        assert pr_posts == 1
+
+    def test_failed_retry_from_committed_stays_committed(
+        self, db: Session, repository: Repository
+    ) -> None:
+        """The claim moves the row to executing; a second PR failure must not
+        mark a real commit as failed."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST" and request.url.path.endswith("/pulls"):
+                return httpx.Response(502, json={"message": "boom"})
+            return _write_path_handler()(request)
+
+        change = _approved_change(
+            db,
+            repository,
+            status=ChangeStatus.COMMITTED,
+            branch_name="devpilot/change/abc123",
+            commit_sha="commit_new",
+        )
+        client = GitHubClient(token="t", transport=httpx.MockTransport(handler))
+        result = execute_change(db, proposal=change, repository=repository, client=client)
+
+        assert result.status == ChangeStatus.COMMITTED
+        assert result.commit_sha == "commit_new"
+        assert result.execution_error
+
+    def test_stuck_execution_with_a_recorded_commit_resumes_at_the_pull_request(
+        self, db: Session, repository: Repository
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import text
+
+        change = _approved_change(
+            db,
+            repository,
+            status=ChangeStatus.EXECUTING,
+            branch_name="devpilot/change/abc123",
+            commit_sha="commit_new",
+        )
+        db.execute(
+            text("UPDATE proposed_changes SET updated_at = :ts WHERE id = :id"),
+            {"ts": datetime.now(UTC) - timedelta(minutes=20), "id": change.id},
+        )
+        db.commit()
+        db.expire_all()
+
+        assert change_repo.claim_for_execution(db, change.id) == ChangeStatus.COMMITTED
+
+    def test_unapproved_changes_never_reach_github(
+        self, db: Session, repository: Repository
+    ) -> None:
+        from app.core.errors import ConflictError
+
+        writes: list[str] = []
+        client = GitHubClient(
+            token="t", transport=httpx.MockTransport(_recording(_write_path_handler(), writes))
+        )
+        for status in (ChangeStatus.PROPOSED, ChangeStatus.REJECTED, ChangeStatus.STALE):
+            change = _approved_change(db, repository, status=status)
+            with pytest.raises(ConflictError):
+                execute_change(db, proposal=change, repository=repository, client=client)
+        assert writes == []

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from unittest import mock
 
 import httpx
 import pytest
@@ -254,6 +255,79 @@ class TestRequestConstruction:
             system="", messages=[Message(role=Role.USER, text="hi")], max_tokens=1234
         )
         assert seen["generationConfig"]["maxOutputTokens"] == 1234  # type: ignore[index]
+
+
+# --------------------------------------------------------------------------- #
+class TestToolSchemaTranslation:
+    """Gemini's functionDeclarations take an OpenAPI subset, not JSON Schema.
+
+    An unknown field is a hard 400, so the real tool definitions — written once,
+    provider-neutrally, in JSON Schema — must be translated on the way out.
+    """
+
+    def test_unsupported_json_schema_keywords_are_removed(self) -> None:
+        from app.services.tools import TOOL_DEFINITIONS
+
+        seen: dict[str, object] = {}
+
+        def on_post(request: httpx.Request) -> httpx.Response:
+            seen.update(_body(request))
+            return _gen_response()
+
+        _provider(_dispatch(on_post=on_post)).complete(
+            system="", messages=[Message(role=Role.USER, text="hi")], tools=TOOL_DEFINITIONS
+        )
+
+        declarations = seen["tools"][0]["functionDeclarations"]  # type: ignore[index]
+        assert [item["name"] for item in declarations] == [t.name for t in TOOL_DEFINITIONS]
+        for declaration in declarations:
+            assert "additionalProperties" not in json.dumps(declaration)
+
+    def test_the_schema_still_describes_the_tool(self) -> None:
+        """Stripping must not lose what the model needs to call the tool."""
+        from app.integrations.gemini_llm.client import _to_gemini_schema
+
+        cleaned = _to_gemini_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repository-relative path."},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+            }
+        )
+
+        assert cleaned == {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Repository-relative path."},
+                "start_line": {"type": "integer", "minimum": 1},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["path"],
+        }
+
+    def test_nested_objects_are_cleaned_too(self) -> None:
+        from app.integrations.gemini_llm.client import _to_gemini_schema
+
+        cleaned = _to_gemini_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "object",
+                        "properties": {"kind": {"type": "string"}},
+                        "additionalProperties": False,
+                    }
+                },
+            }
+        )
+        assert "additionalProperties" not in json.dumps(cleaned)
+        assert cleaned["properties"]["filter"]["properties"] == {"kind": {"type": "string"}}
 
 
 # --------------------------------------------------------------------------- #
@@ -535,7 +609,6 @@ class TestErrorTranslation:
     @pytest.mark.parametrize(
         ("status_code", "error"),
         [
-            (400, LLMContextTooLargeError),
             (401, LLMUnauthorizedError),
             (403, LLMUnauthorizedError),
             (404, LLMError),
@@ -551,6 +624,44 @@ class TestErrorTranslation:
             max_retry_seconds=0.0,
         )
         with pytest.raises(error):
+            provider.complete(system="", messages=[Message(role=Role.USER, text="q")])
+
+    def test_an_oversized_request_is_reported_as_too_large(self) -> None:
+        provider = _provider(
+            _dispatch(
+                on_post=lambda r: httpx.Response(
+                    400,
+                    json={
+                        "error": {"message": "The input token count (2000000) exceeds the maximum"}
+                    },
+                )
+            ),
+            max_retry_seconds=0.0,
+        )
+        with pytest.raises(LLMContextTooLargeError):
+            provider.complete(system="", messages=[Message(role=Role.USER, text="q")])
+
+    def test_a_rejected_payload_is_not_reported_as_too_large(self) -> None:
+        """Gemini uses 400 for a payload it cannot parse as well as for size.
+        Calling a malformed request "too large" sends the caller chasing the
+        wrong problem."""
+        provider = _provider(
+            _dispatch(
+                on_post=lambda r: httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": (
+                                'Invalid JSON payload received. Unknown name "additionalProperties"'
+                            ),
+                            "status": "INVALID_ARGUMENT",
+                        }
+                    },
+                )
+            ),
+            max_retry_seconds=0.0,
+        )
+        with pytest.raises(LLMResponseError):
             provider.complete(system="", messages=[Message(role=Role.USER, text="q")])
 
     def test_error_body_never_appears_in_the_message(self) -> None:
@@ -577,6 +688,40 @@ class TestErrorTranslation:
         provider = _provider(_dispatch(on_post=on_post), max_retry_seconds=0.0)
         with pytest.raises(LLMTimeoutError):
             provider.complete(system="", messages=[Message(role=Role.USER, text="q")])
+
+
+# --------------------------------------------------------------------------- #
+class TestRetryBudget:
+    def test_a_retry_delay_longer_than_the_budget_fails_immediately(self) -> None:
+        """Sleeping a hint the budget cannot cover spends the budget and still
+        retries too early — the caller waits, then fails anyway."""
+        attempts = 0
+        slept: list[float] = []
+
+        def on_post(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "quota",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                "retryDelay": "300s",
+                            }
+                        ],
+                    }
+                },
+            )
+
+        provider = _provider(_dispatch(on_post=on_post), max_retry_seconds=30.0)
+        with mock.patch("time.sleep", slept.append), pytest.raises(LLMRateLimitError):
+            provider.complete(system="", messages=[Message(role=Role.USER, text="q")])
+
+        assert attempts == 1
+        assert slept == []
 
 
 # --------------------------------------------------------------------------- #

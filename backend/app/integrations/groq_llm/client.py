@@ -90,7 +90,15 @@ _RATE_LIMIT_HEADERS = (
 # 400 error `code` values that mean "the model produced something unusable",
 # not "your request was too big". Kept distinct so validation stays strict.
 _MALFORMED_OUTPUT_CODES = frozenset(
-    {"tool_use_failed", "json_validate_failed", "failed_generation"}
+    {
+        "tool_use_failed",
+        "json_validate_failed",
+        "failed_generation",
+        # Groq could not parse the model's own output — seen in practice when a
+        # reasoning model emits a malformed tool call. Retryable, and nothing to
+        # do with request size.
+        "output_parse_failed",
+    }
 )
 
 
@@ -547,9 +555,7 @@ class GroqLLMProvider:
             if not self._sleep_before_retry(start, attempt, last_response):
                 if last_response is not None:
                     return last_response
-                raise self._translate_transport_error(
-                    last_error or httpx.HTTPError("unreachable")
-                )
+                raise self._translate_transport_error(last_error or httpx.HTTPError("unreachable"))
 
     def _sleep_before_retry(
         self, start: float, attempt: int, response: httpx.Response | None
@@ -561,7 +567,17 @@ class GroqLLMProvider:
         if hinted is None:
             base = min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** min(attempt - 1, 10)))
             hinted = max(0.0, base + base * random.uniform(-_JITTER_FRACTION, _JITTER_FRACTION))
-        delay = min(hinted, remaining)
+        if hinted > remaining:
+            # Groq wants longer than this request may wait. Sleeping what is left
+            # would spend the whole budget and still be too early to succeed, so
+            # give up now and report the rate limit rather than stalling first.
+            logger.info(
+                "Groq asked for %.0fs, more than the %.0fs budget left; giving up now",
+                hinted,
+                remaining,
+            )
+            return False
+        delay = hinted
         logger.info(
             "Retrying Groq request in %.1fs (attempt %d, %.0fs budget left)",
             delay,

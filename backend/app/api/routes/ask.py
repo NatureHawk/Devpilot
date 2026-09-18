@@ -286,10 +286,10 @@ def get_change(session: DbSession, user: CurrentUser, change_id: uuid.UUID) -> C
     },
 )
 def approve_change(session: DbSession, user: CurrentUser, change_id: uuid.UUID) -> ChangeRead:
-    """Record approval.
+    """Record approval after re-checking the patch against the current snapshot.
 
     Approval is an application state. Nothing is committed, branched or pushed —
-    writing to GitHub belongs to a later milestone.
+    that happens only through ``POST /changes/{id}/execute``, from ``approved``.
     """
     return _review(session, user, change_id, approve=True)
 
@@ -347,12 +347,9 @@ def _review(session: DbSession, user: User, change_id: uuid.UUID, *, approve: bo
     repository = _require_repository(session, proposal.repository_id, user)
 
     if proposal.status == ChangeStatus.STALE:
-        from app.services.patching import StaleSnapshotError
+        from app.services.patching import STALE_MESSAGE, StaleSnapshotError
 
-        raise StaleSnapshotError(
-            "The repository has been re-indexed since this change was proposed. "
-            "Regenerate it against the current snapshot."
-        )
+        raise StaleSnapshotError(STALE_MESSAGE)
 
     reviewed = change_service.review_change(
         session, proposal=proposal, repository=repository, approve=approve

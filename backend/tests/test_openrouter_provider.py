@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from typing import Any
+from unittest import mock
 
 import httpx
 import pytest
@@ -63,11 +64,14 @@ def _sse(*chunks: dict[str, object]) -> httpx.Response:
 def _provider(
     handler: Callable[[httpx.Request], httpx.Response], **kwargs: object
 ) -> OpenRouterLLMProvider:
+    # No retry budget unless a test asks for one, so error-translation tests do
+    # not sit through real backoff sleeps.
+    options: dict[str, object] = {"max_retry_seconds": 0.0, **kwargs}
     return OpenRouterLLMProvider(
         api_key="test-key",
         model=MODEL,
         transport=httpx.MockTransport(handler),
-        **kwargs,  # type: ignore[arg-type]
+        **options,  # type: ignore[arg-type]
     )
 
 
@@ -381,6 +385,75 @@ class TestStreaming:
             list(_provider(_chat_only(handler)).stream(system="s", messages=[]))
 
 
+class TestRateLimitRetry:
+    """Free models are rate limited hard. A 429 on one investigation turn used
+    to end the whole investigation, because this provider alone never retried."""
+
+    def test_a_rate_limited_request_is_retried_within_the_budget(self) -> None:
+        attempts = 0
+        slept: list[float] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(429, headers={"retry-after": "3"}, json={"error": {}})
+            return _completion_response(content="done")
+
+        provider = _provider(_chat_only(handler), max_retry_seconds=60.0)
+        with mock.patch("time.sleep", slept.append):
+            result = provider.complete(system="s", messages=[])
+
+        assert result.text == "done"
+        assert attempts == 2
+        assert slept == [3.0]
+
+    def test_a_retry_after_longer_than_the_budget_fails_immediately(self) -> None:
+        attempts = 0
+        slept: list[float] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(429, headers={"retry-after": "600"}, json={"error": {}})
+
+        provider = _provider(_chat_only(handler), max_retry_seconds=30.0)
+        with mock.patch("time.sleep", slept.append), pytest.raises(LLMRateLimitError):
+            provider.complete(system="s", messages=[])
+
+        assert attempts == 1
+        assert slept == []
+
+    def test_a_transient_server_error_is_retried(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(503, json={"error": {}})
+            return _completion_response(content="recovered")
+
+        provider = _provider(_chat_only(handler), max_retry_seconds=60.0)
+        with mock.patch("time.sleep", lambda _: None):
+            assert provider.complete(system="s", messages=[]).text == "recovered"
+        assert attempts == 2
+
+    def test_a_definite_failure_is_not_retried(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(401, json={"error": {}})
+
+        provider = _provider(_chat_only(handler), max_retry_seconds=60.0)
+        with pytest.raises(LLMUnauthorizedError):
+            provider.complete(system="s", messages=[])
+        assert attempts == 1
+
+
+# --------------------------------------------------------------------------- #
 class TestErrorTranslation:
     @pytest.mark.parametrize(
         ("status_code", "error"),

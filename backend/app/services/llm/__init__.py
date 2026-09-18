@@ -87,6 +87,7 @@ def get_provider(settings: "Settings") -> LLMProvider:
             max_output_tokens=settings.llm_max_output_tokens,
             effort=settings.llm_effort,
             timeout_seconds=settings.llm_timeout_seconds,
+            max_retry_seconds=settings.openrouter_max_retry_seconds,
         )
 
     if settings.llm_provider == "groq":

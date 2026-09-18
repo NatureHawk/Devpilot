@@ -3,9 +3,16 @@
 **An AI engineering workspace that actually reads your codebase.**
 
 Connect a GitHub repository and DevPilot builds a structured, syntax-aware index of it — every
-function, class and method, with its file, symbol and line range intact. That index is the
-foundation for answering questions about the code and, later, proposing changes you review before
-anything is written back.
+function, class and method, with its file, symbol and line range intact. From that index it
+answers questions with citations, investigates a change request with bounded read-only tools, and
+proposes a patch as a unified diff.
+
+**You review that diff, and nothing reaches GitHub until you approve it.** Once you do, DevPilot
+opens a real pull request: branch, commit, PR, through GitHub's Git Data API.
+
+```
+Understand → Investigate → Change → Review → Ship
+```
 
 <br>
 
@@ -542,8 +549,17 @@ Zero matches or several are both refused — applying to the first of three matc
 silently change the wrong code. The model may only edit files it actually opened during
 its investigation.
 
-**Stale snapshots.** A proposal records the commit its patch was built against. If the
-repository is re-indexed while it waits, it is marked `stale` and cannot be approved.
+**The result is structured, not prose.** An investigation returns an outcome —
+`change_proposed`, `insufficient_evidence` or `unsupported_request` — with a root cause, the
+evidence it rests on, the behaviour expected after the change, and a qualitative confidence
+(never a fabricated probability). Every cited source must be a span a tool actually returned;
+citations that name nothing are dropped, and a proposed change that cites none is rejected. A
+low-confidence conclusion is downgraded to `insufficient_evidence` rather than becoming a
+speculative patch.
+
+**Stale snapshots.** A proposal records the commit its patch was built against, and the blob sha
+of every file it touches. If the repository is re-indexed while it waits, it is marked `stale` and
+cannot be approved.
 The check runs when a proposal is read, again at approval, and a third time immediately
 before execution — the repository can move at any of those points.
 
@@ -718,6 +734,10 @@ small owned abstractions, so every layer stays inspectable.
 
 ## Limitations
 
+- **A validated patch is not a correct patch.** DevPilot proves an edit applies exactly where
+  it was quoted and that the diff reproduces the patched file. It cannot prove the change
+  *works*: nothing is executed. In a twelve-task evaluation, one of eight patches was
+  structurally valid and semantically wrong — which is why approval is mandatory.
 - **Automated tests are not run against a proposed change.** No execution sandbox exists
   in this deployment, so the UI says "patch validated," never "tests passed."
 - **Merging a pull request is not automatic.** DevPilot opens it; a human merges it on
@@ -743,10 +763,15 @@ small owned abstractions, so every layer stays inspectable.
 - [x] Application shell, API and schema
 - [x] GitHub OAuth and repository connection
 - [x] Repository indexing, Tree-sitter parsing, structural chunking
-- [ ] Embeddings and semantic retrieval over indexed chunks
-- [ ] Repository-grounded answers with citations
-- [ ] Proposed code changes as reviewable diffs
-- [ ] Pull request creation after human approval
+- [x] Embeddings and hybrid semantic + lexical retrieval over indexed chunks
+- [x] Repository-grounded answers with citations
+- [x] Bounded agent investigation with read-only tools
+- [x] Proposed code changes as validated, reviewable diffs
+- [x] Pull request creation after explicit human approval
+
+The core workflow is complete end to end and has been run against real repositories with real
+models — see [docs/agentic-change-workflow.md](docs/agentic-change-workflow.md) for the design and
+[docs/agent-reliability.md](docs/agent-reliability.md) for how it held up across twelve tasks.
 
 <br>
 

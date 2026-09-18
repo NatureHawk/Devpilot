@@ -106,6 +106,45 @@ describe("ChangeCard — proposed", () => {
 
     expect(reviewAction).toHaveBeenCalledWith("change-1", "approve", "acme", "widgets");
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ status: "approved" }));
+    expect(executeAction).not.toHaveBeenCalled();
+  });
+
+  it("shows the grounded investigation: root cause, cited evidence and anchor locations", () => {
+    renderCard(
+      change({
+        report: {
+          outcome: "change_proposed",
+          root_cause: "The payload is used before it is checked [S2].",
+          expected_behavior: "Invalid payloads are rejected with 422.",
+          confidence: "medium",
+          evidence: [
+            {
+              id: "S2",
+              path: "backend/api.py",
+              start_line: 10,
+              end_line: 24,
+              symbol: "register",
+              origin: "read_file",
+              claim: "register() writes the payload directly.",
+            },
+          ],
+          proposed_changes: [
+            { path: "backend/api.py", start_line: 2, end_line: 2, reason: "Validate first." },
+          ],
+        },
+      }),
+    );
+
+    expect(screen.getByText(/The payload is used before it is checked/)).toBeVisible();
+    expect(screen.getByText(/Invalid payloads are rejected with 422/)).toBeVisible();
+    expect(screen.getByText(/medium confidence/)).toBeVisible();
+    expect(screen.getByText("S2 · backend/api.py:10–24")).toBeVisible();
+    expect(screen.getByText(/register\(\) writes the payload directly/)).toBeVisible();
+    expect(screen.getByText("backend/api.py:2")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Review diff →" })).toHaveAttribute(
+      "href",
+      "#change-change-1-diff",
+    );
   });
 });
 
@@ -193,6 +232,25 @@ describe("ChangeCard — shipped and closed", () => {
       screen.queryByRole("button", { name: /approve|create branch/i }),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/Merging happens on GitHub/)).toBeVisible();
+  });
+
+  it("lets a stuck execution be retried instead of stranding it on a spinner", async () => {
+    // If the process handling an execution dies, the row stays "executing".
+    // The backend refuses a genuine in-flight run and reclaims an abandoned
+    // one, so the button has to stay available.
+    const user = userEvent.setup();
+    executeAction.mockResolvedValue({
+      ok: true,
+      data: change({ status: "pr_created", pr_number: 4, pr_url: "https://x/pull/4" }),
+    });
+    const onChange = renderCard(change({ status: "executing" }));
+
+    const button = screen.getByRole("button", { name: /creating pull request/i });
+    expect(button).toBeEnabled();
+    await user.click(button);
+
+    expect(executeAction).toHaveBeenCalledWith("change-1", "acme", "widgets");
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ status: "pr_created" }));
   });
 
   it("sends a stale proposal back to investigation with the same request", () => {

@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import islice
 from types import TracebackType
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -399,14 +400,68 @@ class GitHubClient:
             f"/repos/{owner}/{name}/pulls",
             json={"title": title, "body": body, "head": head, "base": base},
         ).json()
-        return GitHubPullRequest(
-            id=int(payload["id"]),
-            number=int(payload["number"]),
-            html_url=str(payload["html_url"]),
-            state=str(payload["state"]),
-            head_ref=str(payload["head"]["ref"]),
-            base_ref=str(payload["base"]["ref"]),
+        return _pull_request_from_payload(payload)
+
+    # ---- write-path recovery reads ----------------------------------------
+    #
+    # Used to make execution idempotent across a crash or a retried request: a
+    # branch or pull request that a previous attempt already created is found
+    # and adopted, never duplicated.
+
+    def get_branch_ref_sha(self, owner: str, name: str, branch: str) -> str | None:
+        """The commit a branch ref points at, or None if the branch does not exist."""
+        try:
+            payload = self._get_json(
+                f"/repos/{owner}/{name}/git/ref/heads/{quote(branch, safe='/')}"
+            )
+        except GitHubNotFoundError:
+            return None
+        # A prefix match returns a list of refs rather than the one asked for.
+        if not isinstance(payload, dict) or payload.get("ref") != f"refs/heads/{branch}":
+            return None
+        return str(payload["object"]["sha"])
+
+    def get_git_commit(self, owner: str, name: str, commit_sha: str) -> tuple[str, list[str]]:
+        """A commit's tree sha and parent shas."""
+        payload = self._get_json(f"/repos/{owner}/{name}/git/commits/{commit_sha}")
+        parents = [str(parent["sha"]) for parent in payload.get("parents") or []]
+        return str(payload["tree"]["sha"]), parents
+
+    def get_file_blob_sha(self, owner: str, name: str, path: str, *, ref: str) -> str | None:
+        """The blob sha of one file at ``ref``, or None if the file is absent there."""
+        try:
+            payload = self._get_json(
+                f"/repos/{owner}/{name}/contents/{quote(path, safe='/')}", params={"ref": ref}
+            )
+        except GitHubNotFoundError:
+            return None
+        if not isinstance(payload, dict) or payload.get("type") != "file":
+            return None
+        return str(payload["sha"])
+
+    def find_open_pull_request(
+        self, owner: str, name: str, *, head: str, base: str
+    ) -> GitHubPullRequest | None:
+        """The open pull request from ``head`` into ``base``, if one exists."""
+        payload = self._get_json(
+            f"/repos/{owner}/{name}/pulls",
+            params={"head": f"{owner}:{head}", "base": base, "state": "open", "per_page": 5},
         )
+        for item in payload if isinstance(payload, list) else []:
+            if (item.get("head") or {}).get("ref") == head:
+                return _pull_request_from_payload(item)
+        return None
+
+
+def _pull_request_from_payload(payload: dict[str, Any]) -> GitHubPullRequest:
+    return GitHubPullRequest(
+        id=int(payload["id"]),
+        number=int(payload["number"]),
+        html_url=str(payload["html_url"]),
+        state=str(payload["state"]),
+        head_ref=str(payload["head"]["ref"]),
+        base_ref=str(payload["base"]["ref"]),
+    )
 
 
 def _repository_from_payload(payload: dict[str, Any]) -> GitHubRepository:

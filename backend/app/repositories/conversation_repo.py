@@ -62,9 +62,19 @@ def list_messages(session: Session, conversation_id: uuid.UUID) -> list[Message]
 def list_conversations(
     session: Session, *, repository_id: uuid.UUID, limit: int = 30
 ) -> list[Conversation]:
+    """Threads with something in them, newest first.
+
+    A conversation row is created when a question is accepted, but the turn is
+    only persisted once the answer completes — so an abandoned or failed ask
+    leaves an empty, untitled row behind. Those are not threads anyone can
+    return to, and listing them puts blank entries in the history.
+    """
     stmt = (
         select(Conversation)
-        .where(Conversation.repository_id == repository_id)
+        .where(
+            Conversation.repository_id == repository_id,
+            select(Message.id).where(Message.conversation_id == Conversation.id).exists(),
+        )
         .order_by(Conversation.created_at.desc())
         .limit(limit)
     )

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator, Sequence
+import random
+import time
+from collections.abc import Callable, Iterator, Sequence
 from types import TracebackType
 from typing import Any
 
@@ -54,6 +56,11 @@ _EFFORT_MAP: dict[str, str] = {
 # Public, unauthenticated endpoint; used only for the capability check below.
 _MODELS_URL = "https://openrouter.ai/api/v1/models"
 
+_RETRY_STATUSES = frozenset({429, 500, 502, 503})
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_MAX_SECONDS = 15.0
+_JITTER_FRACTION = 0.25
+
 
 class OpenRouterLLMProvider:
     """Generative model access via OpenRouter's OpenAI-compatible API."""
@@ -67,6 +74,7 @@ class OpenRouterLLMProvider:
         max_output_tokens: int = 8_000,
         effort: str = "high",
         timeout_seconds: float = 120.0,
+        max_retry_seconds: float = 30.0,
         models_url: str = _MODELS_URL,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -75,6 +83,7 @@ class OpenRouterLLMProvider:
         self._models_url = models_url
         self._max_output_tokens = max_output_tokens
         self._effort = effort
+        self._max_retry_seconds = max_retry_seconds
         # `transport` is a test seam, matching the Voyage and GitHub clients:
         # the suite drives real request-building, SSE parsing and error
         # translation through it without a network.
@@ -189,10 +198,7 @@ class OpenRouterLLMProvider:
         self._require_tool_support(tools)
         request = self._build_request(system, messages, tools, max_tokens, stream=False)
 
-        try:
-            response = self._client.post(self._api_url, json=request)
-        except httpx.HTTPError as exc:
-            raise self._translate_transport_error(exc) from exc
+        response = self._request_with_retry(lambda: self._client.post(self._api_url, json=request))
         if not response.is_success:
             self._raise_for_status(response)
 
@@ -438,6 +444,64 @@ class OpenRouterLLMProvider:
             raise LLMResponseError("The model provider returned an unexpected payload.")
         return body
 
+    # ---- retry ---------------------------------------------------------------
+
+    def _request_with_retry(self, send: Callable[[], httpx.Response]) -> httpx.Response:
+        """Send, retrying rate limits and transient 5xx within a wall-clock budget.
+
+        Free OpenRouter models are rate limited aggressively, and a 429 on the
+        first turn used to end an entire investigation outright — the other two
+        providers have retried since they were written. Honours ``Retry-After``
+        when present, falls back to bounded exponential backoff with jitter, and
+        gives up rather than retrying forever.
+        """
+        start = time.monotonic()
+        attempt = 0
+        last_error: httpx.HTTPError | None = None
+        last_response: httpx.Response | None = None
+        while True:
+            attempt += 1
+            try:
+                response = send()
+            except httpx.HTTPError as exc:
+                last_error, last_response = exc, None
+            else:
+                if response.is_success or response.status_code not in _RETRY_STATUSES:
+                    return response
+                last_response, last_error = response, None
+
+            if not self._sleep_before_retry(start, attempt, last_response):
+                if last_response is not None:
+                    return last_response
+                raise self._translate_transport_error(last_error or httpx.HTTPError("unreachable"))
+
+    def _sleep_before_retry(
+        self, start: float, attempt: int, response: httpx.Response | None
+    ) -> bool:
+        remaining = self._max_retry_seconds - (time.monotonic() - start)
+        if remaining <= 0:
+            return False
+        hinted = _retry_after_seconds(response)
+        if hinted is None:
+            base = min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** min(attempt - 1, 10)))
+            hinted = max(0.0, base + base * random.uniform(-_JITTER_FRACTION, _JITTER_FRACTION))
+        if hinted > remaining:
+            # Waiting what is left would spend the budget and still be too early.
+            logger.info(
+                "OpenRouter asked for %.0fs, more than the %.0fs budget left; giving up now",
+                hinted,
+                remaining,
+            )
+            return False
+        logger.info(
+            "Retrying OpenRouter request in %.1fs (attempt %d, %.0fs budget left)",
+            hinted,
+            attempt,
+            remaining,
+        )
+        time.sleep(hinted)
+        return True
+
     # ---- error translation --------------------------------------------------
 
     @staticmethod
@@ -471,3 +535,17 @@ class OpenRouterLLMProvider:
         if isinstance(exc, httpx.TimeoutException):
             return LLMTimeoutError("The model did not respond in time.")
         return LLMError("The model provider could not be reached.")
+
+
+def _retry_after_seconds(response: httpx.Response | None) -> float | None:
+    """Seconds to wait from a ``Retry-After`` header, or None."""
+    if response is None:
+        return None
+    header = response.headers.get("retry-after")
+    if header is None:
+        return None
+    try:
+        seconds = float(header)
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None

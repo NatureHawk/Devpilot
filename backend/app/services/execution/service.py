@@ -6,9 +6,15 @@
         v
     snapshot re-checked, patch re-validated, secret-scanned
         v
+    live branch checked: every changed file still the validated blob
+        v
     blob(s) -> tree -> commit -> branch          (committed)
         v
     pull request                                  (pr_created)
+
+Recovery: a branch or pull request that an interrupted earlier attempt already
+created is found and adopted — only if it carries exactly this change — never
+created a second time.
 
 Every step after the claim uses only what was already validated when the
 proposal was created, or re-validates it fresh — the model is never consulted
@@ -30,17 +36,19 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ConflictError
 from app.integrations.github.client import GitHubClient
+from app.integrations.github.errors import GitHubConflictError
 from app.models.change import ChangeStatus, ProposedChange
 from app.models.repository import Repository
 from app.repositories import change_repo
 from app.services.execution.branching import generate_branch_name
 from app.services.execution.secret_scan import scan_edits
 from app.services.patching import (
+    STALE_MESSAGE,
     PatchError,
     StaleSnapshotError,
-    assert_snapshot_current,
+    ValidatedPatch,
     parse_edits,
-    validate_patch,
+    revalidate_against_snapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,42 +115,44 @@ def execute_change(
         return _fail(session, proposal, exc.message)
 
     except AppError as exc:
-        if proposal.status == ChangeStatus.COMMITTED:
+        if _has_commit(proposal):
             # The commit and branch are real; only PR creation failed. That is
             # retryable from here, so the commit must not be blamed for it.
-            proposal.execution_error = exc.message
-            change_repo.record_event(proposal, "execution_failed")
-            session.commit()
-            return proposal
+            return _keep_committed(session, proposal, exc.message)
         return _fail(session, proposal, exc.message)
 
     except Exception:
         logger.exception("Change execution failed unexpectedly change_id=%s", proposal.id)
         message = "An unexpected error occurred while executing this change."
-        if proposal.status == ChangeStatus.COMMITTED:
-            proposal.execution_error = message
-            change_repo.record_event(proposal, "execution_failed")
-            session.commit()
-            return proposal
+        if _has_commit(proposal):
+            return _keep_committed(session, proposal, message)
         return _fail(session, proposal, message)
+
+
+def _has_commit(proposal: ProposedChange) -> bool:
+    """Whether a branch and commit already exist on GitHub for this proposal.
+
+    Read from the recorded shas rather than the status: while a retry holds the
+    claim the status is ``executing``, but the commit is still real.
+    """
+    return proposal.commit_sha is not None and proposal.branch_name is not None
+
+
+def _keep_committed(session: Session, proposal: ProposedChange, message: str) -> ProposedChange:
+    proposal.status = ChangeStatus.COMMITTED
+    proposal.execution_error = message
+    change_repo.record_event(proposal, "execution_failed")
+    session.commit()
+    return proposal
 
 
 def _build_branch_and_commit(
     session: Session, *, proposal: ProposedChange, repository: Repository, client: GitHubClient
 ) -> None:
-    assert_snapshot_current(
-        proposal_sha=proposal.indexed_commit_sha, repository_sha=repository.indexed_commit_sha
-    )
+    # The indexed snapshot: same sha, same blobs, every anchor still unique.
+    validated = revalidate_against_snapshot(session, proposal=proposal, repository=repository)
 
-    edits = parse_edits(proposal.edits)
-    validated = validate_patch(
-        session,
-        repository_id=repository.id,
-        edits=edits,
-        allowed_paths={edit.path for edit in edits},
-    )
-
-    finding = scan_edits(edits)
+    finding = scan_edits(parse_edits(proposal.edits))
     if finding is not None:
         raise PatchError(
             f"This change was blocked before committing: {finding.path} appears to contain "
@@ -151,10 +161,9 @@ def _build_branch_and_commit(
         )
 
     owner, name = repository.owner, repository.name
-    base_sha = repository.indexed_commit_sha
-    assert base_sha is not None  # guaranteed by assert_snapshot_current above
+    parent_sha = _verify_live_branch(proposal, repository, client, validated)
 
-    base_tree_sha = client.get_commit_tree_sha(owner, name, base_sha)
+    base_tree_sha = client.get_commit_tree_sha(owner, name, parent_sha)
     tree_entries = [
         {
             "path": file_patch.path,
@@ -167,15 +176,28 @@ def _build_branch_and_commit(
     new_tree_sha = client.create_tree(
         owner, name, base_tree_sha=base_tree_sha, entries=tree_entries
     )
-    new_commit_sha = client.create_commit(
-        owner, name, message=_commit_message(proposal), tree_sha=new_tree_sha, parent_sha=base_sha
-    )
 
     branch = generate_branch_name(proposal.id, proposal.summary)
-    client.create_branch(owner, name, branch=branch, commit_sha=new_commit_sha)
+    commit_sha = _adopt_existing_branch(client, repository, branch, new_tree_sha)
+    if commit_sha is None:
+        commit_sha = client.create_commit(
+            owner,
+            name,
+            message=_commit_message(proposal),
+            tree_sha=new_tree_sha,
+            parent_sha=parent_sha,
+        )
+        try:
+            client.create_branch(owner, name, branch=branch, commit_sha=commit_sha)
+        except GitHubConflictError:
+            # Created concurrently, or by a retried request that did succeed.
+            adopted = _adopt_existing_branch(client, repository, branch, new_tree_sha)
+            if adopted is None:
+                raise
+            commit_sha = adopted
 
     proposal.branch_name = branch
-    proposal.commit_sha = new_commit_sha
+    proposal.commit_sha = commit_sha
     proposal.status = ChangeStatus.COMMITTED
     proposal.executed_at = datetime.now(UTC)
     change_repo.record_event(proposal, "branch_created")
@@ -185,19 +207,102 @@ def _build_branch_and_commit(
     session.commit()
 
 
+def _verify_live_branch(
+    proposal: ProposedChange,
+    repository: Repository,
+    client: GitHubClient,
+    validated: ValidatedPatch,
+) -> str:
+    """Confirm GitHub still holds the code the patch was validated against.
+
+    Returns the commit to build on. When the branch has not moved, that is the
+    indexed commit. When it has moved but every changed file is still the exact
+    blob that was validated, the patch applies unchanged, so it is built on the
+    live head and the pull request contains only this change. If any changed
+    file differs on GitHub, the proposal is stale and nothing is written.
+    """
+    base_sha = repository.indexed_commit_sha
+    assert base_sha is not None  # a proposal only exists for an indexed repository
+
+    head_sha = client.get_branch_head_sha(
+        repository.owner, repository.name, repository.default_branch
+    )
+    if head_sha == base_sha:
+        return base_sha
+
+    for file_patch in validated.files:
+        live_blob = client.get_file_blob_sha(
+            repository.owner, repository.name, file_patch.path, ref=head_sha
+        )
+        if live_blob != file_patch.blob_sha:
+            logger.info(
+                "Change stale on GitHub change_id=%s path=%s indexed=%s head=%s",
+                proposal.id,
+                file_patch.path,
+                base_sha,
+                head_sha,
+            )
+            raise StaleSnapshotError(
+                STALE_MESSAGE,
+                details={
+                    "path": file_patch.path,
+                    "proposed_against": base_sha,
+                    "current": head_sha,
+                },
+            )
+    return head_sha
+
+
+def _adopt_existing_branch(
+    client: GitHubClient, repository: Repository, branch: str, tree_sha: str
+) -> str | None:
+    """The commit on ``branch`` if it already carries exactly this change.
+
+    Branch names are deterministic per proposal, so an existing branch is
+    normally one an interrupted earlier attempt created. It is adopted only if
+    its tree is exactly the tree this attempt built; anything else is a
+    conflict, and the branch is never overwritten.
+    """
+    existing = client.get_branch_ref_sha(repository.owner, repository.name, branch)
+    if existing is None:
+        return None
+    existing_tree, _parents = client.get_git_commit(repository.owner, repository.name, existing)
+    if existing_tree != tree_sha:
+        raise ExecutionConflictError(
+            f"A branch named {branch} already exists on GitHub with different content.",
+            details={"branch": branch},
+        )
+    logger.info("Adopted existing branch branch=%s commit=%s", branch, existing)
+    return existing
+
+
 def _open_pull_request(
     session: Session, *, proposal: ProposedChange, repository: Repository, client: GitHubClient
 ) -> None:
     assert proposal.branch_name is not None  # guaranteed once COMMITTED
 
-    pr = client.create_pull_request(
-        repository.owner,
-        repository.name,
-        title=_pr_title(proposal),
-        body=_pr_body(proposal),
-        head=proposal.branch_name,
-        base=repository.default_branch,
-    )
+    try:
+        pr = client.create_pull_request(
+            repository.owner,
+            repository.name,
+            title=_pr_title(proposal),
+            body=_pr_body(proposal),
+            head=proposal.branch_name,
+            base=repository.default_branch,
+        )
+    except GitHubConflictError:
+        # GitHub refuses a second open pull request for the same head and base.
+        # If this branch already has one — an earlier attempt created it and was
+        # interrupted before recording it — adopt it rather than fail forever.
+        existing = client.find_open_pull_request(
+            repository.owner,
+            repository.name,
+            head=proposal.branch_name,
+            base=repository.default_branch,
+        )
+        if existing is None:
+            raise
+        pr = existing
 
     proposal.status = ChangeStatus.PR_CREATED
     proposal.pr_number = pr.number
@@ -235,13 +340,20 @@ def _pr_title(proposal: ProposedChange) -> str:
 def _pr_body(proposal: ProposedChange) -> str:
     files = sorted({edit["path"] for edit in proposal.edits})
     file_list = "\n".join(f"- `{path}`" for path in files) or "- (no files listed)"
+    report = proposal.report or {}
+    root_cause = str(report.get("root_cause") or "").strip()
+    expected = str(report.get("expected_behavior") or "").strip()
 
     return (
         f"### What changed\n{proposal.summary or '(no summary provided)'}\n\n"
         f"### Files affected\n{file_list}\n\n"
         f"### Why\n{proposal.request}\n\n"
-        "### Validation performed\n"
-        "Patch validated against the indexed snapshot before this commit was created. "
+        + (f"### Root cause\n{root_cause}\n\n" if root_cause else "")
+        + (f"### Expected behaviour\n{expected}\n\n" if expected else "")
+        + "### Validation performed\n"
+        "Every edit anchor matched the indexed file exactly once, the diff was re-applied "
+        "to verify it reproduces the patched file, and each changed file was confirmed "
+        "unchanged on GitHub before this commit was created. "
         "Automated tests were not run — no execution sandbox exists in this deployment.\n\n"
         "---\n"
         "*This change was investigated and proposed by DevPilot's AI agent, reviewed as a "

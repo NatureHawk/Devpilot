@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from typing import Any
+from unittest import mock
 
 import httpx
 import pytest
@@ -637,6 +638,57 @@ class TestErrorTranslation:
             _chat_only(
                 lambda r: httpx.Response(
                     400, json={"error": {"code": "tool_use_failed", "message": "x"}}
+                )
+            ),
+            max_retry_seconds=0.0,
+        )
+        with pytest.raises(LLMResponseError):
+            provider.complete(system="s", messages=[])
+
+    def test_a_retry_after_longer_than_the_budget_fails_immediately(self) -> None:
+        """Sleeping a hint the budget cannot cover spends the whole budget and
+        still retries too early — the caller waits minutes to be told no."""
+        attempts = 0
+        slept: list[float] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(429, headers={"retry-after": "230"}, json={"error": {}})
+
+        provider = _provider(_chat_only(handler), max_retry_seconds=60.0)
+        with mock.patch("time.sleep", slept.append), pytest.raises(LLMRateLimitError):
+            provider.complete(system="s", messages=[])
+
+        assert attempts == 1
+        assert slept == []
+
+    def test_a_retry_after_inside_the_budget_is_honoured(self) -> None:
+        attempts = 0
+        slept: list[float] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(429, headers={"retry-after": "5"}, json={"error": {}})
+            return _completion_response(content="done")
+
+        provider = _provider(_chat_only(handler), max_retry_seconds=60.0)
+        with mock.patch("time.sleep", slept.append):
+            result = provider.complete(system="s", messages=[])
+
+        assert result.text == "done"
+        assert slept == [5.0]
+
+    def test_output_parse_failed_is_a_response_error_not_context_error(self) -> None:
+        """Groq could not parse the model's own output. Seen in practice from a
+        reasoning model's malformed tool call: retryable, and nothing to do with
+        request size — reporting it as 'too large' sends the caller the wrong way."""
+        provider = _provider(
+            _chat_only(
+                lambda r: httpx.Response(
+                    400, json={"error": {"code": "output_parse_failed", "message": "x"}}
                 )
             ),
             max_retry_seconds=0.0,

@@ -103,6 +103,9 @@ class ChangeRead(BaseModel):
     model: str | None
     error: str | None
     investigation: list[dict[str, Any]] = Field(default_factory=list)
+    # The grounded investigation result: outcome, root cause, cited evidence,
+    # anchor locations and the validation performed. Empty for older proposals.
+    report: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     reviewed_at: datetime | None
 

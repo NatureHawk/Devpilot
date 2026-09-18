@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -97,6 +97,13 @@ class ProposedChange(Base, UUIDPrimaryKey, Timestamps):
     # success. No file contents, no arguments that could carry source.
     investigation: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     tool_calls_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The grounded investigation result: outcome, root cause, cited evidence
+    # (locations, never contents), anchor locations, the blob shas the patch was
+    # validated against, and the validation performed. See
+    # app.services.changes._build_report for the shape.
+    report: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     files_changed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     model: Mapped[str | None] = mapped_column(String(100))

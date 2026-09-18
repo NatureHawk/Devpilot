@@ -79,18 +79,33 @@ class FakeLLM:
 def _seed_real_chunks(db: Session, repo: Repository, n: int) -> list[CodeChunk]:
     """Persist ``n`` real chunks so a citation's chunk_id FK actually resolves."""
     src = SourceFile(
-        id=uuid.uuid4(), repository_id=repo.id, path="app/mod.py", blob_sha=uuid.uuid4().hex,
-        size_bytes=100, line_count=50, language="python", content="x", is_parsed=True,
+        id=uuid.uuid4(),
+        repository_id=repo.id,
+        path="app/mod.py",
+        blob_sha=uuid.uuid4().hex,
+        size_bytes=100,
+        line_count=50,
+        language="python",
+        content="x",
+        is_parsed=True,
     )
     db.add(src)
     db.flush()
     chunks = [
         CodeChunk(
-            id=uuid.uuid4(), file_id=src.id, repository_id=repo.id,
-            chunk_type=ChunkType.FUNCTION, node_type="function_definition",
-            symbol=f"sym_{i}", parent_symbol=None,
-            start_line=i * 10, end_line=i * 10 + 4, start_byte=0, end_byte=20,
-            language="python", content=f"def sym_{i}():\n    return {i}",
+            id=uuid.uuid4(),
+            file_id=src.id,
+            repository_id=repo.id,
+            chunk_type=ChunkType.FUNCTION,
+            node_type="function_definition",
+            symbol=f"sym_{i}",
+            parent_symbol=None,
+            start_line=i * 10,
+            end_line=i * 10 + 4,
+            start_byte=0,
+            end_byte=20,
+            language="python",
+            content=f"def sym_{i}():\n    return {i}",
         )
         for i in range(1, n + 1)
     ]
@@ -154,8 +169,14 @@ def _clean() -> Iterator[None]:
     def wipe() -> None:
         with get_session_factory()() as s:
             for table in (
-                "message_sources", "messages", "conversations",
-                "chunk_embeddings", "code_chunks", "files", "repositories", "users",
+                "message_sources",
+                "messages",
+                "conversations",
+                "chunk_embeddings",
+                "code_chunks",
+                "files",
+                "repositories",
+                "users",
             ):
                 s.execute(text(f"DELETE FROM {table}"))
             s.commit()
@@ -171,9 +192,14 @@ def repo(db: Session) -> Repository:
     db.add(user)
     db.flush()  # the user row must exist before the repository FK references it
     repository = Repository(
-        id=uuid.uuid4(), owner="acme", name="api", provider="github",
-        default_branch="main", visibility=RepositoryVisibility.PUBLIC,
-        indexing_status=IndexingStatus.INDEXED, connected_by_user_id=user.id,
+        id=uuid.uuid4(),
+        owner="acme",
+        name="api",
+        provider="github",
+        default_branch="main",
+        visibility=RepositoryVisibility.PUBLIC,
+        indexing_status=IndexingStatus.INDEXED,
+        connected_by_user_id=user.id,
         embedding_model="gemini-embedding-001",
     )
     db.add(repository)
@@ -217,8 +243,12 @@ class TestStreamingAssembly:
 
         chunks = list(
             ask_flow(
-                db, repository=repo, question="Where are sessions made?",
-                conversation=conversation, settings=_settings(), provider=FakeLLM(),
+                db,
+                repository=repo,
+                question="Where are sessions made?",
+                conversation=conversation,
+                settings=_settings(),
+                provider=FakeLLM(),
             )
         )
 
@@ -237,15 +267,25 @@ class TestStreamingAssembly:
 
         chunks = list(
             ask_flow(
-                db, repository=repo, question="q", conversation=conversation,
-                settings=_settings(), provider=FakeLLM(),
+                db,
+                repository=repo,
+                question="q",
+                conversation=conversation,
+                settings=_settings(),
+                provider=FakeLLM(),
             )
         )
         sources = chunks[0].sources
         assert [s["label"] for s in sources] == ["S1", "S2"]
         for s in sources:
             assert {
-                "chunk_id", "file_path", "symbol", "start_line", "end_line", "score", "content"
+                "chunk_id",
+                "file_path",
+                "symbol",
+                "start_line",
+                "end_line",
+                "score",
+                "content",
             } <= s.keys()
 
 
@@ -260,8 +300,16 @@ class TestPersistence:
         monkeypatch.setattr(ask_module, "retrieve", lambda *a, **k: retrieval)
         fake = FakeLLM("Answer text here [S1].")
 
-        list(ask_flow(db, repository=repo, question="How does auth work?",
-                      conversation=conversation, settings=_settings(), provider=fake))
+        list(
+            ask_flow(
+                db,
+                repository=repo,
+                question="How does auth work?",
+                conversation=conversation,
+                settings=_settings(),
+                provider=fake,
+            )
+        )
 
         rows = (
             db.query(Message)
@@ -285,8 +333,16 @@ class TestPersistence:
         retrieval = make_retrieval(3)
         monkeypatch.setattr(ask_module, "retrieve", lambda *a, **k: retrieval)
 
-        list(ask_flow(db, repository=repo, question="q", conversation=conversation,
-                      settings=_settings(), provider=FakeLLM()))
+        list(
+            ask_flow(
+                db,
+                repository=repo,
+                question="q",
+                conversation=conversation,
+                settings=_settings(),
+                provider=FakeLLM(),
+            )
+        )
 
         assistant = (
             db.query(Message)
@@ -315,10 +371,26 @@ class TestPersistence:
         retrieval = make_retrieval(1)
         monkeypatch.setattr(ask_module, "retrieve", lambda *a, **k: retrieval)
 
-        list(ask_flow(db, repository=repo, question="First question?",
-                      conversation=conversation, settings=_settings(), provider=FakeLLM()))
-        list(ask_flow(db, repository=repo, question="Second question?",
-                      conversation=conversation, settings=_settings(), provider=FakeLLM()))
+        list(
+            ask_flow(
+                db,
+                repository=repo,
+                question="First question?",
+                conversation=conversation,
+                settings=_settings(),
+                provider=FakeLLM(),
+            )
+        )
+        list(
+            ask_flow(
+                db,
+                repository=repo,
+                question="Second question?",
+                conversation=conversation,
+                settings=_settings(),
+                provider=FakeLLM(),
+            )
+        )
 
         db.refresh(conversation)
         assert conversation.title == "First question?"
@@ -337,19 +409,29 @@ class TestBoundedHistory:
         # row the same now(), and the UUID PK tiebreak is random).
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(limit + 8):
-            db.add(Message(
-                conversation_id=conversation.id,
-                role=MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT,
-                content=f"prior-{i}",
-                created_at=base + timedelta(seconds=i),
-            ))
+            db.add(
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT,
+                    content=f"prior-{i}",
+                    created_at=base + timedelta(seconds=i),
+                )
+            )
         db.commit()
 
         retrieval = make_retrieval(2)
         monkeypatch.setattr(ask_module, "retrieve", lambda *a, **k: retrieval)
         fake = FakeLLM()
-        list(ask_flow(db, repository=repo, question="the new question",
-                      conversation=conversation, settings=_settings(), provider=fake))
+        list(
+            ask_flow(
+                db,
+                repository=repo,
+                question="the new question",
+                conversation=conversation,
+                settings=_settings(),
+                provider=fake,
+            )
+        )
 
         replayed = [m.text for m in fake.received_messages]
         history = [t for t in replayed if t.startswith("prior-")]
@@ -371,8 +453,16 @@ class TestProviderErrors:
         fake = FakeLLM(raises=LLMRateLimitError("slow down"))
 
         with pytest.raises(LLMRateLimitError):
-            list(ask_flow(db, repository=repo, question="q", conversation=conversation,
-                          settings=_settings(), provider=fake))
+            list(
+                ask_flow(
+                    db,
+                    repository=repo,
+                    question="q",
+                    conversation=conversation,
+                    settings=_settings(),
+                    provider=fake,
+                )
+            )
 
         # A failed turn is not persisted — a partial answer is not a turn.
         assert db.query(Message).filter_by(conversation_id=conversation.id).count() == 0
@@ -383,7 +473,8 @@ class TestProviderErrors:
         retrieval = make_retrieval(2)
         monkeypatch.setattr(ask_module, "retrieve", lambda *a, **k: retrieval)
         monkeypatch.setattr(
-            ask_module, "get_llm_provider",
+            ask_module,
+            "get_llm_provider",
             lambda settings: FakeLLM(raises=LLMRateLimitError("provider is rate limited")),
         )
 
@@ -397,7 +488,7 @@ class TestProviderErrors:
                 )
                 assert resp.status_code == 200  # the stream had already started
                 events = [
-                    json.loads(line[len("data: "):])
+                    json.loads(line[len("data: ") :])
                     for line in resp.text.splitlines()
                     if line.startswith("data: ")
                 ]
@@ -410,3 +501,46 @@ class TestProviderErrors:
         assert error["code"] == "llm_rate_limited"
         assert "rate limit" in error["message"].lower()
         assert "Traceback" not in resp.text  # never leak internals
+
+
+class TestConversationListing:
+    """A conversation row is created when a question is accepted, but the turn is
+    only persisted once the answer completes. An abandoned or failed ask must not
+    leave a blank entry in the user's history."""
+
+    def test_a_conversation_with_no_messages_is_not_listed(
+        self, db: Session, repo: Repository, conversation: Conversation
+    ) -> None:
+        from app.repositories import conversation_repo
+
+        assert conversation_repo.list_conversations(db, repository_id=repo.id) == []
+
+    def test_a_conversation_with_a_turn_is_listed(
+        self, db: Session, repo: Repository, conversation: Conversation
+    ) -> None:
+        from app.repositories import conversation_repo
+
+        db.add(
+            Message(
+                conversation_id=conversation.id,
+                role=MessageRole.USER,
+                content="why is it slow?",
+            )
+        )
+        db.commit()
+
+        listed = conversation_repo.list_conversations(db, repository_id=repo.id)
+        assert [item.id for item in listed] == [conversation.id]
+
+    def test_another_repository_conversation_is_not_listed(
+        self, db: Session, repo: Repository, conversation: Conversation
+    ) -> None:
+        """The repository filter is authorization, not presentation."""
+        import uuid as uuid_module
+
+        from app.repositories import conversation_repo
+
+        db.add(Message(conversation_id=conversation.id, role=MessageRole.USER, content="mine"))
+        db.commit()
+
+        assert conversation_repo.list_conversations(db, repository_id=uuid_module.uuid4()) == []

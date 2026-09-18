@@ -54,10 +54,11 @@ def claim_for_execution(session: Session, change_id: uuid.UUID) -> ChangeStatus 
     (already executing, or in a state execution cannot start from at all).
 
     A proposal stuck in ``executing`` past :data:`_STUCK_EXECUTION_MINUTES` is
-    treated as abandoned and reclaimed as if it were ``approved`` — the
-    process handling it crashed before recording anything further, so nothing
-    is known to have actually completed, and redoing the commit/branch step
-    from scratch is safe (worst case, one extra unused git object).
+    treated as abandoned and reclaimed. If a commit and branch were already
+    recorded it resumes as ``committed`` (only the pull request is left);
+    otherwise as ``approved``. Redoing the commit/branch step is safe: execution
+    adopts a branch or pull request a crashed attempt already created on GitHub
+    rather than creating a second one (worst case, one extra unused git object).
     """
     proposal = session.execute(
         select(ProposedChange).where(ProposedChange.id == change_id).with_for_update()
@@ -79,7 +80,10 @@ def claim_for_execution(session: Session, change_id: uuid.UUID) -> ChangeStatus 
 
     proposal.status = ChangeStatus.EXECUTING
     session.commit()
-    return ChangeStatus.APPROVED if stuck else previous_status
+    if stuck:
+        committed = proposal.commit_sha is not None and proposal.branch_name is not None
+        return ChangeStatus.COMMITTED if committed else ChangeStatus.APPROVED
+    return previous_status
 
 
 def record_event(proposal: ProposedChange, event: str) -> None:

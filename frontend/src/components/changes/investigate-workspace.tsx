@@ -255,6 +255,7 @@ function Result({
 }) {
   const files = summarizeDiff(outcome.diff);
   const proposed = outcome.status === "proposed" && files.length > 0;
+  const report = outcome.report ?? {};
 
   if (!proposed) {
     return (
@@ -262,7 +263,11 @@ function Result({
         <div className="flex items-center gap-2">
           <TriangleAlert aria-hidden="true" className="text-warning size-5" strokeWidth={2} />
           <h2 id="investigation-result" className="text-ink text-lg font-semibold">
-            No change was proposed
+            {report.outcome === "insufficient_evidence"
+              ? "Not enough evidence for a change"
+              : report.outcome === "unsupported_request"
+                ? "Not a change DevPilot can make"
+                : "No change was proposed"}
           </h2>
         </div>
         <p className="text-ink-muted mt-2 max-w-2xl text-sm leading-relaxed">
@@ -270,6 +275,15 @@ function Result({
             outcome.summary ??
             "DevPilot didn't find a change it could make safely."}
         </p>
+        {report.summary && report.summary !== outcome.error ? (
+          <p className="text-ink-muted mt-2 max-w-2xl text-sm leading-relaxed">{report.summary}</p>
+        ) : null}
+        {report.missing_information ? (
+          <p className="text-ink-muted mt-2 max-w-2xl text-sm leading-relaxed">
+            <span className="text-ink font-medium">Missing: </span>
+            {report.missing_information}
+          </p>
+        ) : null}
         <NextStep
           className="mt-6"
           title="Refine the request"
@@ -292,18 +306,31 @@ function Result({
           Investigation complete
         </h2>
       </div>
+      <p className="text-ink-muted mt-2 max-w-2xl text-sm leading-relaxed">
+        DevPilot found the likely cause and prepared a change.
+      </p>
       {outcome.summary ? (
         <p className="text-ink-muted mt-2 max-w-2xl text-sm leading-relaxed">{outcome.summary}</p>
+      ) : null}
+      {report.root_cause ? (
+        <p className="text-ink-muted mt-2 max-w-2xl text-sm leading-relaxed">
+          <span className="text-ink font-medium">Root cause: </span>
+          {report.root_cause}
+        </p>
       ) : null}
       <p className="text-ink-faint mt-2 text-xs">
         {files.length} file{files.length === 1 ? "" : "s"} changed:{" "}
         <span className="font-mono">{files.map((file) => file.path).join(", ")}</span>
+        {report.evidence?.length
+          ? ` · ${report.evidence.length} cited source${report.evidence.length === 1 ? "" : "s"}`
+          : null}
+        {report.confidence ? ` · ${report.confidence} confidence` : null}
       </p>
 
       <NextStep
         className="mt-6"
         title="Review the proposed change"
-        description="Read the diff and how DevPilot got there, then approve or reject it."
+        description="Read the evidence and the diff, then approve or reject it. Nothing reaches GitHub until you do."
         action={
           <ButtonLink href={reviewHref} variant="primary" size="lg" forward>
             Review proposed change

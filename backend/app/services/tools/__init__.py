@@ -6,6 +6,7 @@ touches the database directly.
 """
 
 from app.services.tools.executor import (
+    EvidenceRecord,
     ToolActivity,
     ToolContext,
     execute,
@@ -17,6 +18,7 @@ from app.services.tools.registry import TOOL_DEFINITIONS, TOOL_NAMES
 __all__ = [
     "TOOL_DEFINITIONS",
     "TOOL_NAMES",
+    "EvidenceRecord",
     "ToolActivity",
     "ToolContext",
     "execute",

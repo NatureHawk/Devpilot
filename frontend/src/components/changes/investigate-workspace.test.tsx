@@ -120,6 +120,31 @@ describe("InvestigateWorkspace", () => {
     expect(screen.getByLabelText("What should change?")).toHaveValue("Make it faster");
   });
 
+  it("says plainly when the evidence was insufficient, and what was missing", async () => {
+    const user = userEvent.setup();
+    proposeAction.mockResolvedValue({
+      ok: true,
+      data: proposal({
+        status: "failed",
+        diff: "",
+        error:
+          "DevPilot did not find enough evidence in the repository to propose a change safely.",
+        report: {
+          outcome: "insufficient_evidence",
+          missing_information: "No pagination code is indexed.",
+        },
+      }),
+    });
+    renderWorkspace({ initialRequest: "Paginate the list" });
+
+    await user.click(screen.getByRole("button", { name: "Investigate" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Not enough evidence for a change" }),
+    ).toBeVisible();
+    expect(screen.getByText("No pagination code is indexed.")).toBeVisible();
+  });
+
   it("points to the prerequisite when investigating is blocked", () => {
     renderWorkspace({
       disabledReason: "This repository needs indexing first.",

@@ -55,6 +55,23 @@ def scan_edits(edits: list[ProposedEdit]) -> SecretFinding | None:
     return None
 
 
+def redact_secrets(text: str) -> tuple[str, int]:
+    """Replace anything secret-shaped with a marker; return the text and a count.
+
+    Applied to repository content before it reaches the model, so a credential
+    committed to the repository is never echoed into a prompt or a proposal.
+    """
+    count = 0
+    for pattern, _kind in _PATTERNS:
+        text, replaced = pattern.subn("[REDACTED SECRET]", text)
+        count += replaced
+    return text, count
+
+
+def looks_like_env_file(path: str) -> bool:
+    return _looks_like_env_file(path)
+
+
 def _looks_like_env_file(path: str) -> bool:
     name = path.rsplit("/", 1)[-1]
     return name == ".env" or (name.startswith(".env.") and not name.startswith(".env.example"))

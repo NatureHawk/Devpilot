@@ -324,7 +324,7 @@ class GeminiLLMProvider:
                         {
                             "name": tool.name,
                             "description": tool.description,
-                            "parameters": tool.input_schema,
+                            "parameters": _to_gemini_schema(tool.input_schema),
                         }
                         for tool in tools
                     ]
@@ -372,9 +372,7 @@ class GeminiLLMProvider:
             if message.text:
                 parts.append({"text": message.text})
             for call in message.tool_calls:
-                part: dict[str, Any] = {
-                    "functionCall": {"name": call.name, "args": call.arguments}
-                }
+                part: dict[str, Any] = {"functionCall": {"name": call.name, "args": call.arguments}}
                 signature = call.id.split(_ID_SEP, 2)[2] if call.id.count(_ID_SEP) >= 2 else ""
                 if signature:
                     part["thoughtSignature"] = signature
@@ -446,9 +444,7 @@ class GeminiLLMProvider:
                 if not self._sleep_before_retry(start, attempt, response):
                     self._raise_for_status(response)
 
-    def _request_with_retry(
-        self, send: Callable[[], httpx.Response]
-    ) -> httpx.Response:
+    def _request_with_retry(self, send: Callable[[], httpx.Response]) -> httpx.Response:
         """Send, retrying rate limits and transient 5xx within a wall-clock budget.
 
         Honours the provider's own ``Retry-After`` / ``RetryInfo`` when present,
@@ -475,9 +471,7 @@ class GeminiLLMProvider:
             if not self._sleep_before_retry(start, attempt, last_response):
                 if last_response is not None:
                     return last_response
-                raise self._translate_transport_error(
-                    last_error or httpx.HTTPError("unreachable")
-                )
+                raise self._translate_transport_error(last_error or httpx.HTTPError("unreachable"))
 
     def _sleep_before_retry(
         self, start: float, attempt: int, response: httpx.Response | None
@@ -490,7 +484,17 @@ class GeminiLLMProvider:
         if hinted is None:
             base = min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** min(attempt - 1, 10)))
             hinted = max(0.0, base + base * random.uniform(-_JITTER_FRACTION, _JITTER_FRACTION))
-        delay = min(hinted, remaining)
+        if hinted > remaining:
+            # Gemini wants longer than this request may wait. Sleeping what is
+            # left would spend the whole budget and still retry too early, so
+            # report the limit now instead of stalling first.
+            logger.info(
+                "Gemini asked for %.0fs, more than the %.0fs budget left; giving up now",
+                hinted,
+                remaining,
+            )
+            return False
+        delay = hinted
         logger.info(
             "Retrying Gemini request in %.1fs (attempt %d, %.0fs budget left)",
             delay,
@@ -545,15 +549,20 @@ class GeminiLLMProvider:
         if status_code == 429:
             raise LLMRateLimitError("The model provider's rate limit was reached.")
         if status_code == 400:
-            logger.warning("Gemini rejected the request (400)")
-            raise LLMContextTooLargeError(
-                "The request was rejected by the model. It may be too large — try a "
-                "narrower question."
-            )
+            # Gemini uses 400 both for "too big" and for a payload it cannot
+            # parse. Telling a caller to narrow the question when the real
+            # problem is the request shape sends them chasing the wrong thing,
+            # so the two are separated by what the body actually says.
+            message = _error_message(response)
+            if "token" in message.lower():
+                logger.warning("Gemini rejected the request as too large")
+                raise LLMContextTooLargeError(
+                    "The request was too large for the model. Try a narrower question."
+                )
+            logger.warning("Gemini rejected the request payload (400): %s", message[:300])
+            raise LLMResponseError("The model provider rejected the request payload.")
         if status_code == 404:
-            raise LLMError(
-                "The configured Gemini model was not found. Check GEMINI_LLM_MODEL."
-            )
+            raise LLMError("The configured Gemini model was not found. Check GEMINI_LLM_MODEL.")
         logger.warning("Unexpected Gemini status %s", status_code)
         raise LLMError(f"The model provider returned an unexpected status ({status_code}).")
 
@@ -562,3 +571,61 @@ class GeminiLLMProvider:
         if isinstance(exc, httpx.TimeoutException):
             return LLMTimeoutError("The model did not respond in time.")
         return LLMError("The model provider could not be reached.")
+
+
+# ---- schema translation ------------------------------------------------------
+
+# Gemini's `functionDeclarations.parameters` is an OpenAPI 3.0 Schema subset,
+# not JSON Schema: it rejects the request outright on any field it does not
+# know, `additionalProperties` among them. Tool schemas are written once, in
+# JSON Schema, for every provider — so the translation belongs here rather than
+# in the tool definitions, which must stay provider-neutral.
+_GEMINI_SCHEMA_KEYS = frozenset(
+    {
+        "type",
+        "format",
+        "title",
+        "description",
+        "nullable",
+        "enum",
+        "maxItems",
+        "minItems",
+        "properties",
+        "required",
+        "items",
+        "minimum",
+        "maximum",
+        "anyOf",
+    }
+)
+
+
+def _to_gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop what Gemini does not accept, recursively, keeping meaning intact."""
+    cleaned: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key not in _GEMINI_SCHEMA_KEYS:
+            continue
+        if key == "properties" and isinstance(value, dict):
+            cleaned[key] = {
+                name: _to_gemini_schema(item) if isinstance(item, dict) else item
+                for name, item in value.items()
+            }
+        elif key == "items" and isinstance(value, dict):
+            cleaned[key] = _to_gemini_schema(value)
+        elif key == "anyOf" and isinstance(value, list):
+            cleaned[key] = [
+                _to_gemini_schema(item) if isinstance(item, dict) else item for item in value
+            ]
+        else:
+            cleaned[key] = value
+    return cleaned
+
+
+def _error_message(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    return str(error.get("message", "")) if isinstance(error, dict) else ""

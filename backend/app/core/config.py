@@ -23,6 +23,15 @@ _DEFAULT_CONTEXT_CHARS_BY_PROVIDER: dict[str, int] = {
     "anthropic": 40_000,
 }
 
+# Tool-output character budget for one investigation, per LLM provider, when
+# AGENT_MAX_TOOL_OUTPUT_CHARS is unset. See Settings.effective_agent_tool_output_chars.
+_DEFAULT_AGENT_TOOL_CHARS_BY_PROVIDER: dict[str, int] = {
+    "groq": 14_000,
+    "openrouter": 40_000,
+    "gemini": 120_000,
+    "anthropic": 120_000,
+}
+
 
 class Settings(BaseSettings):
     """Runtime configuration.
@@ -184,6 +193,11 @@ class Settings(BaseSettings):
     openrouter_api_url: str = Field(
         default="https://openrouter.ai/api/v1/chat/completions", alias="OPENROUTER_API_URL"
     )
+    # Free OpenRouter models are rate limited hard; a 429 on one investigation
+    # turn must not end the whole investigation.
+    openrouter_max_retry_seconds: float = Field(
+        default=30.0, ge=0.0, alias="OPENROUTER_MAX_RETRY_SECONDS"
+    )
 
     # Gemini as the generative provider. Conceptually separate from the Gemini
     # *embedding* configuration above — different model, different failure modes
@@ -223,9 +237,7 @@ class Settings(BaseSettings):
     # Wall-clock ceiling on retrying one call against a rate limit or transient
     # 5xx. Small on purpose: the free tier is backed off from, not hammered, and
     # a call must fail loudly rather than retry forever.
-    groq_max_retry_seconds: float = Field(
-        default=30.0, ge=0.0, alias="GROQ_MAX_RETRY_SECONDS"
-    )
+    groq_max_retry_seconds: float = Field(default=30.0, ge=0.0, alias="GROQ_MAX_RETRY_SECONDS")
 
     # ---- Context budget --------------------------------------------------
     # Ceiling on retrieved source sent to the model, in characters. Chosen as a
@@ -250,10 +262,14 @@ class Settings(BaseSettings):
     # open-ended: it investigates and proposes, it does not roam.
     agent_max_tool_calls: int = Field(default=8, ge=1, le=25, alias="AGENT_MAX_TOOL_CALLS")
     agent_max_steps: int = Field(default=10, ge=1, le=30, alias="AGENT_MAX_STEPS")
-    # Total source a single investigation may pull in through tools.
-    agent_max_tool_output_chars: int = Field(
-        default=120_000, ge=5_000, alias="AGENT_MAX_TOOL_OUTPUT_CHARS"
+    # Total source a single investigation may pull in through tools. Unset means
+    # the default for the selected LLM_PROVIDER — see effective_agent_tool_output_chars.
+    agent_max_tool_output_chars: int | None = Field(
+        default=None, ge=5_000, alias="AGENT_MAX_TOOL_OUTPUT_CHARS"
     )
+    # Corrective turns allowed when the final proposal is malformed or its
+    # anchors do not validate. Each one is still bounded by AGENT_MAX_STEPS.
+    agent_max_repair_attempts: int = Field(default=2, ge=0, le=3, alias="AGENT_MAX_REPAIR_ATTEMPTS")
 
     # ---- Retrieval -------------------------------------------------------
     search_default_top_k: int = Field(default=8, ge=1, le=100, alias="SEARCH_DEFAULT_TOP_K")
@@ -330,6 +346,24 @@ class Settings(BaseSettings):
         if self.context_max_chars is not None:
             return self.context_max_chars
         return _DEFAULT_CONTEXT_CHARS_BY_PROVIDER.get(self.llm_provider, 24_000)
+
+    @property
+    def effective_agent_tool_output_chars(self) -> int:
+        """Total tool output one investigation may pull in.
+
+        Every investigation turn re-sends the whole conversation, so this bounds
+        the size of each later request, not just the sum. On Groq's free tier
+        (8K tokens per minute) a single request must stay well under that: the
+        default there is 14,000 characters, roughly 4K tokens of code.
+        """
+        if self.agent_max_tool_output_chars is not None:
+            return self.agent_max_tool_output_chars
+        return _DEFAULT_AGENT_TOOL_CHARS_BY_PROVIDER.get(self.llm_provider, 40_000)
+
+    @property
+    def effective_agent_tool_result_chars(self) -> int:
+        """Largest single tool result, so one read cannot spend the whole budget."""
+        return max(2_000, min(12_000, self.effective_agent_tool_output_chars // 2))
 
     @property
     def gemini_llm_key(self) -> str:
